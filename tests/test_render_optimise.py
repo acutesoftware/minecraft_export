@@ -5,7 +5,7 @@ import unittest
 from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor
 from minecraft_viewer.java_reader import surface_arrays, unpack_values
-from minecraft_viewer.tile_cache import TileCache, render_tile
+from minecraft_viewer.tile_cache import TileCache, render_tile, likely_build
 from minecraft_viewer.db import ArchiveDB
 import tempfile
 import numpy as np
@@ -23,6 +23,12 @@ def pack(values,bits,padded=True):
 
 
 class OptimiseTests(unittest.TestCase):
+    def test_build_material_heuristic(self):
+        for name in ('oak_planks','stone_bricks','rail','dirt_path','glass'):
+            self.assertTrue(likely_build('minecraft:'+name))
+        for name in ('grass_block','stone','water','oak_leaves'):
+            self.assertFalse(likely_build('minecraft:'+name))
+
     def test_packing_formats(self):
         for padded in (False,True):
             values = np.arange(256)%31

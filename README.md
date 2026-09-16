@@ -32,6 +32,8 @@ Open the Maps tab to browse a continuous world map. Visible 512×512-block regio
 - Drag with the left or middle mouse button to pan; arrows or WASD also pan when the canvas has focus.
 - Use the mouse wheel to zoom around the cursor (12.5% through 800%). Blocks stay crisp with nearest-neighbour scaling.
 - Home or **Go To Spawn** returns to spawn. Enter X/Z and press **Go** to visit any coordinate.
+- **Fit saved world** frames the imported chunk extent. Zoom extends down to 1.56%; navigation has no world-boundary clamp. Saves have finite terrain: absent chunks and unfinished generation-stage chunks appear dark.
+- **Builds (likely)** highlights construction materials in gold over dimmed terrain. This uses visible surface materials, not edit history; naturally generated buildings may also be highlighted, and underground builds are not detected. Turn it off to return to the selected map layer.
 - Hover to see block, chunk and region coordinates. Enable the chunk/region grid for boundaries.
 
 Tiles are ordinary PNG cache files beneath `output/maps/tiles/`, separated by world, dimension, renderer version and layer. Terrain tiles are reused across imports; activity tiles remain tied to their import. Cache metadata records source path, timestamp, size, renderer version, layer and colour settings. Valid tiles load without decoding Minecraft data, including offline. Changed source regions or render settings cause a rebuild on the next load. Old standalone PNG exports are retained. Local maps, databases, configuration and logs are ignored by Git.

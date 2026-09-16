@@ -19,6 +19,14 @@ BACKGROUND = (30, 30, 34)
 log = logging.getLogger(__name__)
 
 
+def likely_build(block):
+    """Material heuristic, not proof of edits; structures can generate naturally."""
+    name = block.split(':')[-1]
+    return any(part in name for part in ('planks','bricks','stairs','slab','glass','concrete','rail','torch',
+        'lantern','fence','door','chest','barrel','crafting_table','furnace','redstone','repeater','comparator',
+        'piston','observer','hopper','dispenser','dropper','carpet','dirt_path'))
+
+
 class TileCache:
     def __init__(self, db, output, world_id, import_id, dimension, source):
         self.db = db
@@ -110,14 +118,18 @@ class TileCache:
                 if layer=="height":
                     grey = np.clip(np.rint((heights+64)/384*255),0,255).astype(np.uint8)
                     rgb = np.repeat(grey[:,:,None],3,axis=2)
-                elif layer in ("surface","biome"):
+                elif layer in ("surface","biome","builds"):
                     identifiers = biomes if layer=="biome" else names
                     unique,inverse = np.unique(identifiers,return_inverse=True)
                     palette = np.array([color_for(str(n)) for n in unique],dtype=np.uint8)
                     rgb = palette[inverse].reshape(16,16,3)
-                    if layer=="surface":
+                    if layer in ("surface","builds"):
                         shade = np.clip(.85+(heights-63)/500,.65,1.15)
                         rgb = np.clip(rgb*shade[:,:,None],0,255).astype(np.uint8)
+                    if layer == "builds":
+                        built = np.array([likely_build(str(n)) for n in unique])[inverse].reshape(16,16)
+                        rgb = (rgb.astype(float)*.45).astype(np.uint8)
+                        rgb[built] = (255,205,35)
                 else: raise ValueError(f"Unknown layer: {layer}")
                 rgb[~visible] = BACKGROUND
                 pixels[cz*16:cz*16+16,cx*16:cx*16+16] = rgb

@@ -36,7 +36,7 @@ class Camera:
 
     def zoom_at(self, factor, sx, sy, width, height):
         x, z = self.world(sx,sy,width,height)
-        self.zoom = max(.125,min(8,self.zoom*factor))
+        self.zoom = max(1/64,min(8,self.zoom*factor))
         self.x = x-(sx-width/2)/self.zoom
         self.z = z-(sy-height/2)/self.zoom
 
@@ -94,6 +94,9 @@ class MapView(ttk.Frame):
             entry = ttk.Entry(navigation,width=10); entry.pack(side="left"); self.entries.append(entry)
             entry.bind("<Return>",lambda _:self.go_coordinate())
         ttk.Button(navigation,text="Go",command=self.go_coordinate).pack(side="left")
+        ttk.Button(navigation,text="Fit saved world",command=self.fit_world).pack(side="left",padx=4)
+        self.builds_enabled = tk.BooleanVar(value=False)
+        ttk.Checkbutton(navigation,text="Builds (likely)",variable=self.builds_enabled,command=self.redraw).pack(side="left")
         self.export_button = ttk.Button(navigation,text="Export PNG...",command=self.export_png, state="disabled")
         self.export_button.pack(side="left", padx=8)
         self.info = ttk.Label(self,text="Select a world. Drag to pan; wheel to zoom; arrows/WASD to move.")
@@ -139,6 +142,20 @@ class MapView(ttk.Frame):
             if d["dimension_key"] == self.dimension.get():
                 self.cache = TileCache(self.db,self.output,self.world_id,d["import_id"],d["dimension_key"],d["source_path"])
         self.known_regions = self.cache.known_regions() if self.cache else None
+        self.redraw()
+
+    def effective_layer(self):
+        return 'builds' if self.builds_enabled.get() else self.layer.get()
+
+    def fit_world(self):
+        if not self.cache: return
+        row = self.db.row('SELECT MIN(chunk_x),MAX(chunk_x),MIN(chunk_z),MAX(chunk_z) FROM mc_chunk WHERE import_id=? AND dimension_key=?',
+                          (self.cache.import_id,self.cache.dimension))
+        if row is None or row[0] is None: return
+        x0,x1,z0,z1 = row[0]*16,(row[1]+1)*16,row[2]*16,(row[3]+1)*16
+        self.camera.x,self.camera.z = (x0+x1)/2,(z0+z1)/2
+        scale = min(self.canvas.winfo_width()/max(1,x1-x0),self.canvas.winfo_height()/max(1,z1-z0))*.9
+        self.camera.zoom = max(1/64,min(8,2**math.floor(math.log2(scale))))
         self.redraw()
 
     def go_spawn(self):
@@ -201,12 +218,18 @@ class MapView(ttk.Frame):
             c.create_text(20,20,anchor="nw",fill="white",text="Select a world with imported dimensions.")
             self._report_status()
             return
-        regions = self.camera.regions(w,h)
-        self.visible_keys = {(self.epoch,self.layer.get(),rx,rz) for rx,rz in regions}
+        if self.known_regions is None:
+            regions = self.camera.regions(w,h)
+        else:
+            left,top = self.camera.world(0,0,w,h)
+            right,bottom = self.camera.world(w,h,w,h)
+            regions = [(rx,rz) for rx,rz in self.known_regions
+                       if rx*512 < right and (rx+1)*512 > left and rz*512 < bottom and (rz+1)*512 > top]
+        self.visible_keys = {(self.epoch,self.effective_layer(),rx,rz) for rx,rz in regions}
         centre = (math.floor(self.camera.x/512),math.floor(self.camera.z/512))
         regions.sort(key=lambda r:(r != centre,(r[0]*512+256-self.camera.x)**2+(r[1]*512+256-self.camera.z)**2))
         for rx,rz in regions:
-            key = (self.epoch,self.layer.get(),rx,rz)
+            key = (self.epoch,self.effective_layer(),rx,rz)
             if self.known_regions is not None and (rx,rz) not in self.known_regions:
                 self.images[key] = self.empty_image
             x,y = self.camera.screen(rx*512,rz*512,w,h)
@@ -301,7 +324,7 @@ class MapView(ttk.Frame):
         done = ready + errors
         self.export_button.configure(state="normal" if total and ready == total else "disabled")
         if not total:
-            text = "Select a world to load its map."
+            text = "No saved regions in this view. Use Fit saved world or Go To Spawn." if self.cache else "Select a world to load its map."
         elif done == total:
             text = f"Finished loading map: {ready-empty}/{total-empty} terrain tiles; {empty} areas with no saved region"
             if errors:
@@ -315,6 +338,8 @@ class MapView(ttk.Frame):
                 text += f" | Processing region {key[2]},{key[3]} ({int(time.monotonic()-started)}s)"
                 if key not in self.visible_keys:
                     text += " from previous view"
+        if self.builds_enabled.get():
+            text += " | Gold: likely build materials (may include natural structures)."
         state = (text,done-empty,total-empty)
         if state != self.last_status:
             self.last_status = state
@@ -349,13 +374,13 @@ class MapView(ttk.Frame):
                 draw.text((sx+12,sy),"Spawn",fill="#ff8888")
         draw.text((width-75,8),"N (-Z)\n   ^\nW  +  E\n   v\nS (+Z)",fill="white")
         metadata = PngInfo()
-        for key,value in {"World":self.world_name,"Dimension":self.dimension.get(),"Layer":self.layer.get(),
+        for key,value in {"World":self.world_name,"Dimension":self.dimension.get(),"Layer":self.effective_layer(),
                           "Centre X":self.camera.x,"Centre Z":self.camera.z,"Zoom":self.camera.zoom}.items():
             metadata.add_text(key,str(value))
         folder = Path(self.output) / "exports"
         folder.mkdir(parents=True,exist_ok=True)
         filename = filedialog.asksaveasfilename(parent=self,title="Export current map view to PNG",
-            initialdir=str(folder.resolve()),initialfile=export_filename(self.world_name,self.layer.get(),self.camera.x,self.camera.z),
+            initialdir=str(folder.resolve()),initialfile=export_filename(self.world_name,self.effective_layer(),self.camera.x,self.camera.z),
             defaultextension=".png",filetypes=[("PNG image","*.png")])
         if not filename:
             return
