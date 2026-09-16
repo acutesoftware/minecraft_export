@@ -7,7 +7,7 @@ name = "minecraft-viewer"
 version = "0.1.0"
 description = "Read-only Minecraft Java world archive viewer"
 requires-python = ">=3.10"
-dependencies = ["nbtlib>=2.0,<3", "Pillow>=10,<12"]
+dependencies = ["nbtlib>=2.0,<3", "Pillow>=10,<12", "numpy>=1.26,<3"]
 
 [project.gui-scripts]
 minecraft-viewer = "minecraft_viewer.app:main"

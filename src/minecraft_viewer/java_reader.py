@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import nbtlib
+import numpy as np
+import time
+import logging
 
 from .models import ChunkInfo, DimensionInfo, PlayerData, WorldMetadata
 from .world_layout import WorldLayout
@@ -54,6 +57,41 @@ class JavaWorldReader:
 
     def __init__(self, root: str | Path):
         self.layout = WorldLayout.detect(root)
+
+    @staticmethod
+    def iter_region_surfaces(path, metrics):
+        """Open a region once; parse each present chunk once for map extraction."""
+        start = time.perf_counter()
+        with Path(path).open('rb') as stream:
+            header = stream.read(4096)
+            if len(header) != 4096:
+                raise ValueError('Truncated region header')
+            metrics['open_decompress'] = time.perf_counter()-start
+            for index in range(1024):
+                entry = int.from_bytes(header[index*4:index*4+4], 'big')
+                if not entry:
+                    metrics['missing'] += 1
+                    continue
+                metrics['present'] += 1
+                try:
+                    start = time.perf_counter()
+                    stream.seek((entry >> 8)*4096)
+                    length = int.from_bytes(stream.read(4),'big')
+                    compression = stream.read(1)[0]
+                    if length < 1 or length > (entry & 255)*4096-4:
+                        raise ValueError('Invalid chunk length')
+                    data = stream.read(length-1)
+                    if compression == 1: data = gzip.decompress(data)
+                    elif compression == 2: data = zlib.decompress(data)
+                    elif compression != 3: raise ValueError(f'Unsupported compression {compression}')
+                    metrics['open_decompress'] += time.perf_counter()-start
+                    start = time.perf_counter()
+                    chunk = _plain(nbtlib.File.parse(BytesIO(data)))
+                    metrics['parse'] += time.perf_counter()-start
+                    yield index%32,index//32,surface_arrays(chunk,metrics)
+                except Exception:
+                    metrics['errors'] += 1
+                    logging.getLogger(__name__).exception('Map chunk %s in %s failed',index,path)
 
     def read_world_metadata(self) -> WorldMetadata:
         root = _load_nbt(self.layout.root / "level.dat")
@@ -128,7 +166,8 @@ class JavaWorldReader:
             except (ValueError, IndexError, OSError):
                 continue
 
-    def _read_chunk(self, region_path: Path, index: int) -> dict[str, Any]:
+    @staticmethod
+    def _read_chunk(region_path: Path, index: int) -> dict[str, Any]:
         with region_path.open("rb") as fh:
             fh.seek(index * 4)
             entry = int.from_bytes(fh.read(4), "big")
@@ -140,7 +179,8 @@ class JavaWorldReader:
         raw = gzip.decompress(payload) if compression == 1 else zlib.decompress(payload) if compression == 2 else payload
         return _plain(nbtlib.File.parse(BytesIO(raw)))
 
-    def get_map_samples(self, dimension: DimensionInfo, bounds: tuple[int, int, int, int]) -> Iterator[dict[str, Any]]:
+    @staticmethod
+    def get_map_samples(dimension: DimensionInfo, bounds: tuple[int, int, int, int]) -> Iterator[dict[str, Any]]:
         min_x, min_z, max_x, max_z = bounds
         min_cx, max_cx = min_x // 16, (max_x - 1) // 16
         min_cz, max_cz = min_z // 16, (max_z - 1) // 16
@@ -160,8 +200,10 @@ class JavaWorldReader:
                         if not int.from_bytes(header[index * 4:index * 4 + 4], "big"):
                             continue
                         try:
-                            yield from _surface_samples(self._read_chunk(path, index), cx, cz, bounds)
+                            yield from _surface_samples(JavaWorldReader._read_chunk(path, index), cx, cz, bounds)
                         except Exception:
+                            import logging
+                            logging.getLogger(__name__).exception("Unreadable map chunk %s,%s in %s", cx, cz, path)
                             continue
 
 
@@ -198,8 +240,18 @@ LEGACY_BLOCKS = {
     13: "minecraft:gravel", 17: "minecraft:oak_log", 18: "minecraft:oak_leaves", 24: "minecraft:sandstone",
     31: "minecraft:grass", 78: "minecraft:snow", 79: "minecraft:ice", 80: "minecraft:snow_block",
     87: "minecraft:netherrack", 88: "minecraft:soul_sand", 89: "minecraft:glowstone", 110: "minecraft:mycelium",
-    121: "minecraft:end_stone", 159: "minecraft:terracotta", 172: "minecraft:terracotta"
+    121: "minecraft:end_stone", 159: "minecraft:terracotta", 172: "minecraft:terracotta",
+    20: "minecraft:glass", 35: "minecraft:white_wool", 41: "minecraft:gold_block",
+    42: "minecraft:iron_block", 43: "minecraft:stone_slab", 44: "minecraft:stone_slab",
+    45: "minecraft:bricks", 49: "minecraft:obsidian", 53: "minecraft:oak_stairs",
+    66: "minecraft:rail", 67: "minecraft:cobblestone_stairs", 98: "minecraft:stone_bricks",
+    108: "minecraft:brick_stairs", 109: "minecraft:stone_brick_stairs", 155: "minecraft:quartz_block"
 }
+
+
+def is_visible_surface(block_id: str) -> bool:
+    """Opaque and translucent blocks, including roofs/water/leaves, cover air."""
+    return block_id not in ("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
 
 
 LEGACY_BIOMES = {
@@ -209,6 +261,110 @@ LEGACY_BIOMES = {
     14: "minecraft:mushroom_fields", 16: "minecraft:beach", 21: "minecraft:jungle", 24: "minecraft:deep_ocean",
     35: "minecraft:savanna", 37: "minecraft:badlands"
 }
+
+
+def unpack_values(data, indices, bits, padded):
+    indices = np.asarray(indices,dtype=np.int64)
+    if len(data)==0: return np.zeros(indices.shape,dtype=np.int64)
+    words = np.asarray(data).astype(np.uint64)
+    if padded:
+        word = indices//(64//bits)
+        offset = indices%(64//bits)*bits
+    else:
+        word = indices*bits//64
+        offset = indices*bits%64
+    values = words[word] >> offset.astype(np.uint64)
+    if not padded:
+        crosses = offset+bits>64
+        values[crosses] |= words[word[crosses]+1] << (64-offset[crosses]).astype(np.uint64)
+    return (values & ((1<<bits)-1)).astype(np.int64)
+
+
+def surface_arrays(chunk, metrics):
+    """256 direct heightmap lookups; vectorised section fallback only as needed."""
+    start = time.perf_counter()
+    level = chunk.get('Level',chunk)
+    version = int(chunk.get('DataVersion',0))
+    sections = {int(s['Y']):s for s in level.get('sections',level.get('Sections',[])) if 'block_states' in s or 'Palette' in s or 'Blocks' in s}
+    columns = np.arange(256)
+    heights = None
+    minimum = int(level.get('yPos',min(sections,default=0)))*16 if version>=2825 else 0
+    packed = level.get('Heightmaps',{}).get('WORLD_SURFACE',[])
+    if len(packed):
+        try:
+            # Standard 256/384-high worlds both use 9 bits. Larger custom worlds
+            # can be resolved from the array length and recorded section extent.
+            candidates = [b for b in range(9,17) if len(packed)==(math.ceil(256/(64//b)) if version>=2529 else math.ceil(256*b/64))]
+            if candidates:
+                heights = unpack_values(packed,columns,candidates[0],version>=2529)+minimum-1
+        except (IndexError,ValueError): pass
+    elif len(level.get('HeightMap',[]))==256:
+        heights = np.asarray(level['HeightMap'],dtype=np.int64)-1
+    metrics['heightmaps'] += time.perf_counter()-start
+    start = time.perf_counter()
+    names = np.full(256,'minecraft:air',dtype=object)
+    ys = np.full(256,minimum-1,dtype=np.int64)
+    decoded = {}
+
+    def blocks(sy, indices):
+        s = sections[sy]
+        if sy not in decoded:
+            state = s.get('block_states',{})
+            palette = state.get('palette',s.get('Palette',[]))
+            if palette:
+                palette = np.array([str(p.get('Name',p.get('name','minecraft:air'))) for p in palette],dtype=object)
+                decoded[sy] = (palette,state.get('data',s.get('BlockStates',[])))
+            else: decoded[sy] = (None,np.asarray(s.get('Blocks',[]),dtype=np.int64)&255)
+        palette,data = decoded[sy]
+        if palette is not None:
+            return palette[unpack_values(data,indices,max(4,(len(palette)-1).bit_length()),version>=2529)]
+        ids = data[indices]
+        return np.array([LEGACY_BLOCKS.get(int(i),'minecraft:unknown') for i in ids.flat],dtype=object).reshape(ids.shape)
+
+    def visible(values):
+        return ~np.isin(values,['minecraft:air','minecraft:cave_air','minecraft:void_air'])
+
+    if heights is not None:
+        metrics['fast'] += 1
+        for sy in np.unique(heights//16):
+            if sy not in sections: continue
+            mask = heights//16==sy
+            names[mask] = blocks(sy,(heights[mask]%16)*256+columns[mask])
+            ys[mask] = heights[mask]
+        unresolved = ~visible(names) & (heights>=minimum)
+    else:
+        unresolved = np.ones(256,dtype=bool)
+    if np.any(unresolved):
+        metrics['fallback'] += 1
+        for sy in sorted(sections,reverse=True):
+            cols = columns[unresolved]
+            if not len(cols): break
+            values = blocks(sy,np.arange(16)[:,None]*256+cols[None,:])
+            occupied = visible(values)
+            found = occupied.any(axis=0)
+            top = 15-np.argmax(occupied[::-1],axis=0)
+            chosen = cols[found]
+            names[chosen] = values[top[found],np.flatnonzero(found)]
+            ys[chosen] = sy*16+top[found]
+            unresolved[chosen] = False
+    biomes = np.full(256,'minecraft:unknown',dtype=object)
+    old = level.get('Biomes',[])
+    if len(old)==256:
+        biomes[:] = [LEGACY_BIOMES.get(int(i)&255,'minecraft:unknown') for i in old]
+    elif len(old)>=1024:
+        indices = np.clip(ys//4,0,len(old)//16-1)*16+(columns//16//4)*4+(columns%16//4)
+        biomes[:] = [LEGACY_BIOMES.get(int(old[i]),'minecraft:unknown') for i in indices]
+    for sy in np.unique(ys//16):
+        s = sections.get(sy,{})
+        data = s.get('biomes',{})
+        palette = data.get('palette',[])
+        if not palette: continue
+        mask = ys//16==sy
+        cols = columns[mask]
+        indices = (ys[mask]%16//4)*16+(cols//16//4)*4+cols%16//4
+        biomes[mask] = np.asarray(palette,dtype=object)[unpack_values(data.get('data',[]),indices,max(1,(len(palette)-1).bit_length()),True)]
+    metrics['surface'] += time.perf_counter()-start
+    return names.reshape(16,16),ys.reshape(16,16),biomes.reshape(16,16),visible(names).reshape(16,16)
 
 
 def _surface_samples(chunk: dict[str, Any], cx: int, cz: int, bounds: tuple[int, int, int, int]) -> Iterator[dict[str, Any]]:
@@ -236,11 +392,13 @@ def _surface_samples(chunk: dict[str, Any], cx: int, cz: int, bounds: tuple[int,
                         if len(blocks) != 4096:
                             continue
                         name = LEGACY_BLOCKS.get(int(blocks[idx]) & 255, "minecraft:unknown")
-                    if name not in ("minecraft:air", "minecraft:cave_air", "minecraft:void_air"):
+                    if is_visible_surface(name):
                         biomes = section.get("biomes", {})
                         bpalette = biomes.get("palette", [])
                         if bpalette:
-                            biome = str(bpalette[0])
+                            bi = (ly//4)*16+(lz//4)*4+lx//4
+                            bits = max(1,(len(bpalette)-1).bit_length())
+                            biome = str(bpalette[_packed_index(biomes.get("data", []),bi,bits,compact=True)])
                         elif len(chunk_biomes) >= 256:
                             biome = LEGACY_BIOMES.get(int(chunk_biomes[lz * 16 + lx]) & 255, "minecraft:unknown")
                         else:

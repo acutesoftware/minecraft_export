@@ -27,7 +27,16 @@ NBT and Anvil access is isolated in `JavaWorldReader`; UI and database code do n
 
 ## Maps
 
-Surface, biome, height, and activity maps are standalone PNGs. Presets cover 512, 1024, and 2048 block radii. Surface rendering uses simplified colours rather than Minecraft textures. The UI marks spawn with a red crosshair and supports scrolling and zooming.
+Open the Maps tab to browse a continuous world map. Visible 512×512-block region tiles load automatically; new areas render in a background thread. Surface, biome, height, and activity layers share the same camera location and zoom.
+
+- Drag with the left or middle mouse button to pan; arrows or WASD also pan when the canvas has focus.
+- Use the mouse wheel to zoom around the cursor (12.5% through 800%). Blocks stay crisp with nearest-neighbour scaling.
+- Home or **Go To Spawn** returns to spawn. Enter X/Z and press **Go** to visit any coordinate.
+- Hover to see block, chunk and region coordinates. Enable the chunk/region grid for boundaries.
+
+Tiles are ordinary PNG cache files beneath `output/maps/tiles/`, separated by world, dimension, renderer version and layer. Terrain tiles are reused across imports; activity tiles remain tied to their import. Cache metadata records source path, timestamp, size, renderer version, layer and colour settings. Valid tiles load without decoding Minecraft data, including offline. Changed source regions or render settings cause a rebuild on the next load. Old standalone PNG exports are retained. Local maps, databases, configuration and logs are ignored by Git.
+
+Rendering uses WORLD_SURFACE heightmaps (or legacy HeightMap) and NumPy chunk/region arrays. Chunks without usable heightmaps use a vectorised fallback. The camera's region is queued first; visible tiles are displayed as each finishes. Up to four processes render missing tiles; set `map_render_workers` to 1–4 in `config.json` to adjust CPU use. Cached tiles load in an I/O thread, and pan/zoom reuse existing images. Per-region timings, cache hits, chunk counts and fast-path/fallback counts are logged to `logs/minecraft_viewer.log`. The upgraded renderer uses a new cache version, so the first visit rebuilds older tiles once.
 
 ## Deferred work
 

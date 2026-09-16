@@ -7,11 +7,10 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from PIL import Image, ImageTk
 
 from .db import ArchiveDB
 from .importer import import_world
-from .map_renderer import generate_map
+from .map_view import MapView
 from .world_layout import discover_worlds
 
 
@@ -21,6 +20,8 @@ class ViewerApp(tk.Tk):
         self.db, self.settings, self.root_path = db, config, root_path
         self.selected_world: int | None = None
         self.events: queue.Queue = queue.Queue()
+        self.import_jobs = 0
+        self.map_status = ("Ready",0,0)
         self.title("Minecraft Viewer"); self.geometry("1200x760"); self.minsize(900, 600)
         self._menu(); self._layout(); self.refresh_worlds(); self.after(100, self._poll)
 
@@ -45,7 +46,7 @@ class ViewerApp(tk.Tk):
         overview_tools = ttk.Frame(overview_frame); overview_tools.pack(fill=tk.X, pady=4)
         ttk.Button(overview_tools, text="Open Source Folder", command=self.open_source).pack(side=tk.LEFT, padx=3)
         ttk.Button(overview_tools, text="Import / Refresh", command=self.refresh_import).pack(side=tk.LEFT, padx=3)
-        ttk.Button(overview_tools, text="Generate Default Maps", command=self.generate_default_maps).pack(side=tk.LEFT, padx=3)
+        ttk.Button(overview_tools, text="Browse Map", command=self.generate_default_maps).pack(side=tk.LEFT, padx=3)
         self.overview = tk.Text(overview_frame, wrap="word", padx=12, pady=12); self.overview.pack(fill=tk.BOTH, expand=True)
         self.players_tab = ttk.Frame(self.tabs); self.tabs.add(self.players_tab, text="Players")
         self._players_ui(); self.stats_tab = ttk.Frame(self.tabs); self.tabs.add(self.stats_tab, text="Stats & Advancements"); self._stats_ui()
@@ -55,7 +56,8 @@ class ViewerApp(tk.Tk):
         future.insert("1.0", "Server Sessions & Screenshots\n\nFuture functionality:\n- import Minecraft server logs\n- record player join/leave sessions\n- index screenshots\n- correlate screenshots with active worlds\n- build a combined world timeline")
         future.configure(state="disabled")
         status = ttk.Frame(self); status.pack(fill=tk.X); self.status = ttk.Label(status, text="Ready"); self.status.pack(side=tk.LEFT, padx=6)
-        self.progress = ttk.Progressbar(status, mode="indeterminate", length=180); self.progress.pack(side=tk.RIGHT, padx=6)
+        self.progress = ttk.Progressbar(status, mode="indeterminate", length=180)
+        self.tabs.bind("<<NotebookTabChanged>>", lambda _: self._display_map_status())
 
     def _text_tab(self, title):
         frame = ttk.Frame(self.tabs); self.tabs.add(frame, text=title); text = tk.Text(frame, wrap="word", padx=12, pady=12); text.pack(fill=tk.BOTH, expand=True); return text
@@ -84,18 +86,14 @@ class ViewerApp(tk.Tk):
         tree.pack(fill=tk.BOTH, expand=True); return tree
 
     def _maps_ui(self):
-        tools = ttk.Frame(self.maps_tab); tools.pack(fill=tk.X, pady=4)
-        self.map_type = ttk.Combobox(tools, values=("surface", "biome", "height", "activity"), state="readonly", width=12); self.map_type.set("surface"); self.map_type.pack(side=tk.LEFT)
-        self.map_type.bind("<<ComboboxSelected>>", lambda _: self._load_latest_map())
-        self.map_dimension = ttk.Combobox(tools, values=("minecraft:overworld",), state="readonly", width=24); self.map_dimension.set("minecraft:overworld"); self.map_dimension.pack(side=tk.LEFT, padx=3)
-        self.map_radius = ttk.Combobox(tools, values=(512, 1024, 2048), state="readonly", width=8); self.map_radius.set(self.settings.get("default_map_radius", 1024)); self.map_radius.pack(side=tk.LEFT)
-        ttk.Button(tools, text="Generate Map", command=self.generate_map).pack(side=tk.LEFT, padx=4); ttk.Button(tools, text="Open Map File", command=self.open_map).pack(side=tk.LEFT)
-        for label, factor in (("Zoom In", 1.25), ("Zoom Out", .8), ("Reset", 0)):
-            ttk.Button(tools, text=label, command=lambda f=factor: self._zoom(f)).pack(side=tk.LEFT, padx=2)
-        self.canvas = tk.Canvas(self.maps_tab, bg="#222"); xs = ttk.Scrollbar(self.maps_tab, orient=tk.HORIZONTAL, command=self.canvas.xview); ys = ttk.Scrollbar(self.maps_tab, orient=tk.VERTICAL, command=self.canvas.yview)
-        self.canvas.configure(xscrollcommand=xs.set, yscrollcommand=ys.set); xs.pack(side=tk.BOTTOM, fill=tk.X); ys.pack(side=tk.RIGHT, fill=tk.Y); self.canvas.pack(fill=tk.BOTH, expand=True)
-        self.map_image = None; self.map_scale = 1.0; self.map_path: Path | None = None
-        self.canvas.create_text(20, 20, anchor="nw", fill="#ddd", text="Select a world, then generate a map.", tags="empty-message")
+        output = Path(self.settings["map_output_path"])
+        if not output.is_absolute():
+            output = self.root_path / output
+        log_path = self.root_path / "logs" / "minecraft_viewer.log"
+        log_path.parent.mkdir(parents=True,exist_ok=True)
+        self.map_view = MapView(self.maps_tab, self.db, output, self._map_status_changed,
+                                self.settings.get("map_render_workers",4), log_path)
+        self.map_view.pack(fill=tk.BOTH, expand=True)
 
     def refresh_worlds(self):
         self.worlds.delete(*self.worlds.get_children())
@@ -105,7 +103,7 @@ class ViewerApp(tk.Tk):
     def _select_world(self, _=None):
         selection = self.worlds.selection()
         if not selection: return
-        self.selected_world = int(selection[0]); self.refresh_details(); self._load_latest_map()
+        self.selected_world = int(selection[0]); self.refresh_details(); self.map_view.set_world(self.selected_world)
 
     def refresh_details(self):
         w = self.db.row("SELECT * FROM mc_world WHERE world_id=?", (self.selected_world,)); s = self.db.row("SELECT * FROM mc_world_source WHERE world_id=? ORDER BY last_seen_at DESC LIMIT 1", (self.selected_world,))
@@ -151,15 +149,16 @@ class ViewerApp(tk.Tk):
         if source: self._start_import(source)
         else: messagebox.showinfo("World", "Select an imported world first.")
     def generate_default_maps(self):
-        if not self.selected_world: messagebox.showinfo("Maps", "Select a world first."); return
-        output = Path(self.settings["map_output_path"]); output = output if output.is_absolute() else self.root_path / output
-        radius = int(self.settings.get("default_map_radius", 1024))
-        self._run(lambda: [generate_map(self.db, self.selected_world, kind, radius, self._post_status, output) for kind in ("surface", "biome", "height", "activity")], self._default_maps_done)
-    def _default_maps_done(self, paths, error):
-        self.progress.stop()
-        if error: messagebox.showerror("Map generation failed", str(error)); return
-        self.map_path = Path(paths[0]); self.map_scale = 1; self._draw_map(); self.status.configure(text=f"Generated {len(paths)} default maps")
+        if not self.selected_world:
+            messagebox.showinfo("Maps", "Select a world first.")
+            return
+        self.tabs.select(self.maps_tab)
+        self.map_view.go_spawn()
+
     def _run(self, work, done):
+        self.import_jobs += 1
+        self.progress.configure(mode="indeterminate")
+        self.progress.pack(side=tk.RIGHT, padx=6)
         self.progress.start(10)
         def target():
             try: result = work(); self.events.put((done, result, None))
@@ -175,9 +174,31 @@ class ViewerApp(tk.Tk):
         except queue.Empty: pass
         self.after(100, self._poll)
     def _import_done(self, result, error):
-        self.progress.stop()
+        self.import_jobs = max(0,self.import_jobs-1)
+        if not self.import_jobs:
+            self.progress.stop()
+            self.progress.pack_forget()
         if error: messagebox.showerror("Import failed", str(error)); self.status.configure(text="Import failed")
         else: self.status.configure(text="Import complete"); self.refresh_worlds()
+        if self.tabs.select() == str(self.maps_tab): self._display_map_status()
+
+    def _map_status_changed(self, text, done, total):
+        self.map_status = (text, done, total)
+        self._display_map_status()
+
+    def _display_map_status(self):
+        if not hasattr(self, "progress") or self.import_jobs:
+            return
+        self.progress.stop()
+        self.progress.pack_forget()
+        if self.tabs.select() != str(self.maps_tab):
+            self.status.configure(text="Ready")
+            return
+        text, done, total = self.map_status
+        self.status.configure(text=text)
+        if done < total:
+            self.progress.configure(mode="determinate", maximum=total, value=done)
+            self.progress.pack(side=tk.RIGHT,padx=6)
 
     def _show_player(self, _=None):
         if not self.player_list.selection(): return
@@ -194,33 +215,3 @@ class ViewerApp(tk.Tk):
             if query in (r[0] + r[1]).lower(): self.stats.insert("", "end", values=tuple(r))
         for r in self.db.rows("SELECT advancement_key,completed,completed_at FROM mc_player_advancement WHERE player_id=? AND import_id=(SELECT MAX(import_id) FROM mc_player_advancement WHERE player_id=?) ORDER BY completed_at", (pid, pid)):
             self.advancements.insert("", "end", values=(r[0], "Yes" if r[1] else "No", r[2] or ""))
-
-    def generate_map(self):
-        if not self.selected_world: messagebox.showinfo("Maps", "Select a world first."); return
-        output = Path(self.settings["map_output_path"]); output = output if output.is_absolute() else self.root_path / output
-        self._run(lambda: generate_map(self.db, self.selected_world, self.map_type.get(), int(self.map_radius.get()), self._post_status, output), self._map_done)
-    def _map_done(self, path, error):
-        self.progress.stop()
-        if error: messagebox.showerror("Map generation failed", str(error)); return
-        self.map_path = Path(path); self.map_scale = 1; self._draw_map(); self.status.configure(text=f"Map saved: {path}")
-    def _load_latest_map(self):
-        if not self.selected_world:
-            return
-        row = self.db.row("SELECT output_path FROM mc_map_render WHERE world_id=? AND map_type=? AND dimension_key=? ORDER BY map_render_id DESC LIMIT 1", (self.selected_world, self.map_type.get(), self.map_dimension.get()))
-        if row and Path(row[0]).is_file():
-            self.map_path = Path(row[0]); self.map_scale = 1; self._draw_map()
-            self.status.configure(text=f"Showing latest {self.map_type.get()} map")
-        else:
-            self.map_path = None; self.map_image = None; self.canvas.delete("all")
-            self.canvas.create_text(20, 20, anchor="nw", fill="#ddd", text=f"No {self.map_type.get()} map exists for this world yet.\nClick Generate Map to create one.")
-    def _draw_map(self):
-        if not self.map_path: return
-        image = Image.open(self.map_path)
-        target = (max(1, int(image.width * self.map_scale)), max(1, int(image.height * self.map_scale)))
-        image = image.resize(target, Image.Resampling.BILINEAR)
-        self.map_image = ImageTk.PhotoImage(image); self.canvas.delete("all"); self.canvas.create_image(0, 0, image=self.map_image, anchor="nw")
-        cx, cy = image.width // 2, image.height // 2; self.canvas.create_line(cx-12,cy,cx+12,cy,fill="red",width=2); self.canvas.create_line(cx,cy-12,cx,cy+12,fill="red",width=2); self.canvas.configure(scrollregion=(0,0,image.width,image.height))
-    def _zoom(self, factor): self.map_scale = 1 if factor == 0 else max(.1, min(4, self.map_scale * factor)); self._draw_map()
-    def open_map(self):
-        if self.map_path and self.map_path.exists(): os.startfile(self.map_path)
-        else: messagebox.showinfo("Maps", "Generate or select a map first.")
