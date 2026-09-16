@@ -1,0 +1,8 @@
+{
+  "database_path": "data/minecraft_archive.db",
+  "map_output_path": "output/maps",
+  "default_map_radius": 1024,
+  "last_world_folder": "",
+  "screenshot_folders": []
+}
+

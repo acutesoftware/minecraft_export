@@ -209,6 +209,17 @@ tempCodeRunnerFile.py
 # PyPI configuration file
 .pypirc
 
+# Minecraft Viewer local archive and generated/user data
+/config.json
+/data/
+/output/
+/logs/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

@@ -1,0 +1,8 @@
+{
+  "fallback": "#8b7f8f",
+  "grass": "#638d3d", "water": "#3f76e4", "sand": "#d8ca7e",
+  "stone": "#7d7d7d", "snow": "#f5f7f7", "leaves": "#3f6f32",
+  "log": "#74562e", "wood": "#74562e", "lava": "#e65b16",
+  "dirt": "#866043", "deepslate": "#4b4b50", "ice": "#8ebfff"
+}
+
