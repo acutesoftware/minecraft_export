@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from time import perf_counter
 
-from .mesh3d import MeshWorld, minecraft_to_renderer, terrain_jobs
+from .mesh3d import MeshWorld, minecraft_to_renderer, renderer_to_minecraft, mesh_to_renderer, terrain_jobs
 from .java_reader import surface_arrays
 from .shader3d import terrain_shader
 from .textures3d import TextureAtlas,find_client,read_assets
@@ -29,7 +29,8 @@ def read_archive(db,world_id,dimension):
         dim=connection.execute("SELECT * FROM mc_dimension WHERE world_id=? AND dimension_key=? ORDER BY import_id DESC LIMIT 1",(world_id,dimension)).fetchone()
         if world is None or dim is None:raise ValueError('Import this world and its Overworld before opening 3D')
         coords=connection.execute('SELECT chunk_x,chunk_z FROM mc_chunk WHERE import_id=? AND dimension_key=?',(dim['import_id'],dimension)).fetchall()
-        return dict(world),dict(dim),{tuple(r) for r in coords}
+        result=dict(world);result['world_name']=result.get('display_name') or result['world_name']
+        return result,dict(dim),{tuple(r) for r in coords}
 
 
 def run(args):
@@ -62,7 +63,7 @@ def run(args):
     output=Path(args.output).resolve()
     source=Path(dimension['source_path']).resolve()
     if not args.export_id and not source.is_dir():
-        raise FileNotFoundError('Source world is unavailable. Open a saved scene from the 3D Exports tab instead.')
+        raise FileNotFoundError('Source world is unavailable. Open a saved scene from the 3D Viewer tab instead.')
     if output==source or source in output.parents:
         raise ValueError('3D cache/screenshots must be outside the Minecraft source world')
     output.mkdir(parents=True,exist_ok=True)
@@ -93,11 +94,13 @@ def run(args):
     camera.fov=65
     camera.position=minecraft_to_renderer(sx+30,initial_y,sz+30)
     def aim_at_spawn():
-        dx,dy,dz=sx-camera.x,sy-camera.y,sz-camera.z
+        tx,ty,tz=minecraft_to_renderer(sx,sy,sz)
+        dx,dy,dz=tx-camera.x,ty-camera.y,tz-camera.z
         camera.rotation=(math.degrees(math.atan2(-dy,math.hypot(dx,dz))),math.degrees(math.atan2(dx,dz)),0)
     aim_at_spawn()
     if replay_manifest:
-        camera.position=tuple(replay_manifest['camera_position']);camera.rotation=tuple(replay_manifest['camera_rotation'])
+        camera.position=minecraft_to_renderer(*replay_manifest['camera_position'])
+        rx,ry,rz=replay_manifest['camera_rotation'];camera.rotation=(rx,-ry,rz)
     from ursina import Texture
     from PIL import Image
     import io
@@ -184,7 +187,8 @@ def run(args):
         def reload(self):
             if self.loading:return
             self.loaded=0;self.errors=0;self.loading=True;self.started=perf_counter()
-            cx,cz=int(math.floor(camera.x/16)),int(math.floor(camera.z/16))
+            mcx,mcy,mcz=renderer_to_minecraft(*camera.position)
+            cx,cz=int(math.floor(mcx/16)),int(math.floor(mcz/16))
             near=int(self.sliders['Detailed radius'].value);far=max(near,int(self.sliders['Distant radius'].value))
             camera.clip_plane_far=max(2048,far*3)
             work=terrain_jobs(known,cx,cz,near,far)
@@ -202,7 +206,8 @@ def run(args):
             existing={key:value[0] for key,value in self.terrain.items()}
             self.requested=sum(len(coords) for key,coords in work)
             manifest={'world':world,'dimension':dimension,'detailed_radius':near,'distant_radius':far,
-                      'camera_position':list(camera.position),'camera_rotation':list(camera.rotation),
+                      'camera_position':list(renderer_to_minecraft(*camera.position)),
+                      'camera_rotation':[camera.rotation_x,-camera.rotation_y,camera.rotation_z],
                       'settings':{name:slider.value for name,slider in self.sliders.items()},
                       'requested_chunks':self.requested,'centre_chunk':[cx,cz],
                       'scope':'Bounded visual scene: surface band, detailed near cubes, simplified distant shell; not gameplay or a full-world backup.',
@@ -210,7 +215,7 @@ def run(args):
                       'coordinates':'Minecraft X/Y/Z, Y up; local vertices + mesh origin; clockwise triangles',
                       'mesh_format':'NPZ arrays: vertices float32 Nx3, normals Nx3, colors Nx4, uvs Nx2; no pickle',
                       'texture_format':'PNG RGBA atlas; nearest sampling; UV origin bottom left; first animation frame',
-                      'renderer_version':'textured-cubes-1'}
+                      'renderer_version':'textured-cubes-2-z-reflected'}
             previous_export=self.export_id
             def send(value):
                 while not self.stop.is_set():
@@ -266,7 +271,7 @@ def run(args):
                     app.graphicsEngine.renderFrame();app.graphicsEngine.renderFrame()
                     if not app.win.saveScreenshot(Filename.fromOsSpecific(str(path))):raise OSError('Screenshot capture failed')
                     metadata={'render_type':'GENERATED_3D','world_uuid':world['world_uuid'],'dimension':args.dimension,
-                              'camera':list(camera.position),'time_of_day':self.sliders['Time of day'].value,'fov':camera.fov}
+                              'camera':list(renderer_to_minecraft(*camera.position)),'time_of_day':self.sliders['Time of day'].value,'fov':camera.fov}
                     path.with_suffix('.json').write_text(json.dumps(metadata,indent=2))
                     logging.info('Screenshot saved %s',path)
                     self.notice=f'Saved {path.name}'
@@ -278,7 +283,7 @@ def run(args):
             if key=='p':self.toggle_photo()
             elif key=='h':self.hidden=not self.hidden;self.hud.enabled=not self.hidden
             elif key=='g':
-                camera.position=(sx+30,initial_y,sz+30);aim_at_spawn()
+                camera.position=minecraft_to_renderer(sx+30,initial_y,sz+30);aim_at_spawn()
             elif key=='f2':self.screenshot()
             elif key=='r':self.reload()
             elif key=='escape':
@@ -311,15 +316,16 @@ def run(args):
                 if data is None:continue  # Unchanged meshes stay on the GPU.
                 failed=data.get('failed_chunks',0)
                 self.errors+=failed
+                render_data=mesh_to_renderer(data)
                 for entity in self.terrain.pop(key,(None,[]))[1]:destroy(entity)
                 entities=[]
                 self.terrain[key]=(None if failed else signature,entities)
                 start=perf_counter()
                 # Separate translucent faces to keep opaque geometry depth writing.
                 for translucent in (False,True):
-                    select=(data['colors'][:,3]<1)==translucent
+                    select=(render_data['colors'][:,3]<1)==translucent
                     if not select.any():continue
-                    buffer=np.ascontiguousarray(np.concatenate((data['vertices'][select],data['normals'][select],data['colors'][select],data['uvs'][select]),axis=1),dtype=np.float32)
+                    buffer=np.ascontiguousarray(np.concatenate((render_data['vertices'][select],render_data['normals'][select],render_data['colors'][select],render_data['uvs'][select]),axis=1),dtype=np.float32)
                     mesh=Mesh(vertex_buffer=buffer.tobytes(),vertex_buffer_length=len(buffer),vertex_buffer_format='p3f,n3f,c4f,t2f',
                               triangles=list(range(len(buffer))),mode='triangle',static=True)
                     entity=Entity(model=mesh,position=minecraft_to_renderer(key[1]*16,0,key[2]*16),shader=shader,texture=terrain_texture)
@@ -328,7 +334,8 @@ def run(args):
                     entities.append(entity)
                 logging.info('3D GPU upload batch=%s chunks=%s %.3fs',key,count,perf_counter()-start)
             status=f'Loading {self.loaded}/{self.requested}' if self.loading else f'Finished ({self.errors} skipped)'
-            self.info.text=f"{'PHOTO' if self.photo else 'EXPLORE'} | X {camera.x:.0f} Y {camera.y:.0f} Z {camera.z:.0f} | Speed {self.speed:.0f}\n{status}\nWASD / Space / Ctrl: fly | Shift: fast | G: spawn | P: photo | R: reload | H: HUD | F2: screenshot\n{getattr(self,'notice','')}"
+            mcx,mcy,mcz=renderer_to_minecraft(*camera.position)
+            self.info.text=f"{'PHOTO' if self.photo else 'EXPLORE'} | X {mcx:.0f} Y {mcy:.0f} Z {mcz:.0f} | Speed {self.speed:.0f}\n{status}\nWASD / Space / Ctrl: fly | Shift: fast | G: spawn | P: photo | R: reload | H: HUD | F2: screenshot\n{getattr(self,'notice','')}"
 
     controller=Controller()
     if args.smoke_test:
@@ -359,7 +366,8 @@ def main():
     parser=argparse.ArgumentParser(description='Experimental read-only Minecraft 3D viewer')
     parser.add_argument('--world-id',type=int,required=True);parser.add_argument('--db',required=True)
     parser.add_argument('--dimension',default='minecraft:overworld')
-    parser.add_argument('--output',default='output/3d')
+    parser.add_argument('--output')
+    parser.add_argument('--log')
     parser.add_argument('--detailed-radius',type=int,default=192)
     parser.add_argument('--distant-radius',type=int,default=768)
     parser.add_argument('--shadows',action='store_true')
@@ -368,10 +376,13 @@ def main():
     parser.add_argument('--smoke-test',action='store_true',help=argparse.SUPPRESS)
     parser.add_argument('--smoke-reload',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
+    archive_root=Path(args.db).resolve().parent.parent
+    args.output=args.output or str(archive_root/'output'/'3d')
     if not 16<=args.detailed_radius<=256 or not args.detailed_radius<=args.distant_radius<=1024:
         parser.error('Use detailed radius 16–256 and distant radius detailed–1024')
-    Path('logs').mkdir(exist_ok=True)
-    logging.basicConfig(filename='logs/viewer3d.log',level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
+    log_path=Path(args.log) if args.log else archive_root/'logs'/'viewer3d.log'
+    log_path.parent.mkdir(parents=True,exist_ok=True)
+    logging.basicConfig(filename=log_path,level=logging.INFO,format='%(asctime)s %(levelname)s %(message)s')
     try:run(args)
     except Exception:
         logging.exception('3D viewer failed')

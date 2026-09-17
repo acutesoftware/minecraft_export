@@ -8,14 +8,21 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).parents[1] / "src"))
 
 from minecraft_viewer.db import ArchiveDB, SCHEMA_VERSION
+from minecraft_viewer.app import DEFAULT_USER_FOLDER_ROOT,load_config
 from minecraft_viewer.java_reader import _packed_index, _surface_samples, parse_advancements, parse_statistics
-from minecraft_viewer.importer import import_world
+from minecraft_viewer.importer import import_world,archive_display_name
 from minecraft_viewer.map_renderer import block_color, map_bounds, unknown_color
 from minecraft_viewer.models import WorldMetadata
 from minecraft_viewer.world_layout import LayoutType, WorldLayout, discover_worlds
 
 
 class LayoutTests(unittest.TestCase):
+    def test_archive_names_use_scan_relative_path_and_drop_generic_world(self):
+        root=Path('X:/minecraft')
+        self.assertEqual(archive_display_name(root/'2025/blah/world','world',root),('2025/blah','2025/blah/world'))
+        self.assertEqual(archive_display_name(root/'2025/blah','world',root),('2025/blah','2025/blah'))
+        self.assertEqual(archive_display_name(root/'server/world','world'),('server',None))
+
     def test_legacy_layout_and_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); (root / "level.dat").touch(); (root / "region").mkdir()
@@ -39,6 +46,16 @@ class LayoutTests(unittest.TestCase):
 
 
 class DatabaseTests(unittest.TestCase):
+    def test_config_centralises_user_data_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path=Path(tmp)/'config.json'
+            path.write_text('{"database_path":"data/old.db","map_output_path":"output/old"}')
+            config=load_config(Path(tmp))
+            self.assertEqual(config['USER_FOLDER_ROOT'],DEFAULT_USER_FOLDER_ROOT)
+            self.assertNotIn('database_path',config);self.assertNotIn('map_output_path',config)
+            stored=path.read_text()
+            self.assertIn('USER_FOLDER_ROOT',stored);self.assertNotIn('old.db',stored)
+
     def test_schema_and_future_tables(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = ArchiveDB(Path(tmp) / "archive.db")
@@ -71,6 +88,7 @@ class DatabaseTests(unittest.TestCase):
                 world_id, import_id, status = import_world(db, root)
             self.assertEqual(status, "PARTIAL")
             self.assertEqual(db.row("SELECT world_name FROM mc_world WHERE world_id=?", (world_id,))[0], "Fixture")
+            self.assertEqual(db.row("SELECT display_name FROM mc_world WHERE world_id=?",(world_id,))[0],"Fixture")
             self.assertIn("damaged optional region", db.row("SELECT message FROM mc_import WHERE import_id=?", (import_id,))[0])
 
 

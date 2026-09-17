@@ -20,7 +20,7 @@ from minecraft_viewer.db import ArchiveDB
 
 def fixture_assets():
     assets={}
-    for name,colour in [('stone',(190,180,170,255)),('top',(200,70,40,255))]:
+    for name,colour in [('stone',(190,180,170,255)),('top',(200,70,40,255)),('short_grass',(120,190,80,0))]:
         picture=Image.new('RGBA',(16,16),colour)
         for y in range(16):
             for x in range(16):
@@ -29,6 +29,9 @@ def fixture_assets():
         assets[f'assets/minecraft/textures/block/{name}.png']=stream.getvalue()
     assets['assets/minecraft/models/block/base.json']=json.dumps({'textures':{'all':'minecraft:block/stone'},'elements':[{'faces':{name:{'texture':'#top' if name=='up' else '#all'} for name in ('up','down','east','west','south','north')}}]}).encode()
     assets['assets/minecraft/models/block/stone.json']=json.dumps({'parent':'minecraft:block/base','textures':{'top':'minecraft:block/top'}}).encode()
+    assets['assets/minecraft/models/block/cross.json']=json.dumps({'textures':{'particle':'#cross'},'elements':[{'faces':{'north':{'texture':'#cross'},'south':{'texture':'#cross'}}}]}).encode()
+    assets['assets/minecraft/models/block/sugar_cane.json']=json.dumps({'parent':'minecraft:block/cross','textures':{'cross':'minecraft:block/short_grass'}}).encode()
+    assets['assets/minecraft/blockstates/sugar_cane.json']=b'{"variants":{"":{"model":"minecraft:block/sugar_cane"}}}'
     return assets
 
 
@@ -70,6 +73,7 @@ class TextureTests(unittest.TestCase):
         self.assertFalse(np.array_equal(top,side))
         self.assertGreater(side[2,1],side[0,1])  # Side corner 1 is above corner 0.
         self.assertFalse(atlas.face('mod:missing','up')[1])
+        self.assertTrue(atlas.face('minecraft:grass','north')[1])
         image=Image.open(io.BytesIO(atlas.png))
         uv=atlas.face('mod:missing','up')[0][0]
         self.assertEqual(image.getpixel((int(uv[0]*image.width),int((1-uv[1])*image.height))),(255,255,255,255))
@@ -81,6 +85,12 @@ class TextureTests(unittest.TestCase):
         self.assertNotEqual(first.fingerprint,second.fingerprint)
         with tempfile.TemporaryDirectory() as root:
             self.assertNotEqual(MeshWorld(root,root,'w',first).cache,MeshWorld(root,root,'w',second).cache)
+
+    def test_model_and_alpha_drive_render_shape(self):
+        atlas=TextureAtlas(fixture_assets())
+        self.assertEqual(atlas.render_shape('minecraft:sugar_cane'),'cross')
+        self.assertEqual(atlas.render_shape('minecraft:short_grass'),'cutout_cube')
+        self.assertTrue(atlas.face('minecraft:sugar_cane','north')[2])
 
     def test_cycles_terminate(self):
         assets=fixture_assets()

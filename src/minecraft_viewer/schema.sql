@@ -18,12 +18,14 @@ CREATE TABLE IF NOT EXISTS mc_3d_export_asset (
 CREATE TABLE IF NOT EXISTS app_schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mc_world (
  world_id INTEGER PRIMARY KEY, world_uuid TEXT NOT NULL UNIQUE, world_name TEXT NOT NULL, edition TEXT NOT NULL DEFAULT 'JAVA',
+ display_name TEXT,
  seed TEXT, data_version INTEGER, minecraft_version TEXT, game_type TEXT, difficulty TEXT, hardcore INTEGER, allow_commands INTEGER,
  spawn_x INTEGER, spawn_y INTEGER, spawn_z INTEGER, world_time INTEGER, day_time INTEGER, last_played INTEGER,
  first_imported_at TEXT NOT NULL, last_imported_at TEXT NOT NULL, notes TEXT
 );
 CREATE TABLE IF NOT EXISTS mc_world_source (
  world_source_id INTEGER PRIMARY KEY, world_id INTEGER NOT NULL REFERENCES mc_world(world_id), source_path TEXT NOT NULL,
+ scan_root TEXT, relative_name TEXT,
  source_type TEXT NOT NULL DEFAULT 'unknown', first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, is_current INTEGER NOT NULL DEFAULT 1,
  UNIQUE(world_id, source_path)
 );

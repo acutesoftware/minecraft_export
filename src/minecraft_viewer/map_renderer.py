@@ -46,7 +46,8 @@ def biome_color(biome: str) -> tuple[int, int, int]:
     return next((color for key, color in categories.items() if key in name), unknown_color(biome))
 
 
-def generate_map(db: ArchiveDB, world_id: int, map_type: str, radius: int, progress: Callable[[str], None] = lambda _: None, output_root: str | Path = "output/maps") -> Path:
+def generate_map(db:ArchiveDB,world_id:int,map_type:str,radius:int,progress:Callable[[str],None]=lambda _:None,
+                 output_root:str|Path|None=None)->Path:
     world = db.row("SELECT * FROM mc_world WHERE world_id=?", (world_id,))
     source = db.row("SELECT * FROM mc_world_source WHERE world_id=? AND is_current=1 ORDER BY last_seen_at DESC LIMIT 1", (world_id,))
     latest = db.row("SELECT import_id FROM mc_import WHERE world_id=? AND status IN ('COMPLETE','PARTIAL') ORDER BY import_id DESC LIMIT 1", (world_id,))
@@ -82,11 +83,11 @@ def generate_map(db: ArchiveDB, world_id: int, map_type: str, radius: int, progr
             else: raise ValueError(f"Unknown map type: {map_type}")
             pixels[x, z] = color
             if count % 100_000 == 0: progress(f"Rendered {count:,} blocks...")
-    folder = Path(output_root) / str(world_id)
+    output_root=Path(output_root) if output_root else db.path.parent.parent/'output'/'maps'
+    folder=output_root/str(world_id)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"{map_type}_{centre_x}_{centre_z}_r{radius}_{datetime.now():%Y%m%d_%H%M%S}.png"
     image.save(path, "PNG")
     with db.connect() as con:
         con.execute("INSERT INTO mc_map_render(world_id,import_id,dimension_key,map_type,centre_x,centre_z,radius_blocks,blocks_per_pixel,width_pixels,height_pixels,output_path,generated_at,renderer_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (world_id, latest[0], "minecraft:overworld", map_type, centre_x, centre_z, radius, 1.0, size, size, str(path.resolve()), datetime.now(timezone.utc).isoformat(), __version__))
     return path.resolve()
-

@@ -2,7 +2,7 @@
 
 Minecraft Viewer is a local, read-only desktop archive browser for Minecraft Java Edition worlds. It imports metadata, dimensions, chunks, players, inventories, statistics, and advancements into a versioned SQLite archive. It generates ordinary PNG surface, biome, height, and chunk-activity maps centred on world spawn.
 
-The application never writes to a Minecraft save. The database and maps live separately under `data/` and `output/maps/` by default.
+The application never writes to a Minecraft save. All user-generated data lives beneath `USER_FOLDER_ROOT`; only `config.json`, which points to that location, lives in the code folder.
 
 ## Install and run
 
@@ -15,9 +15,13 @@ pip install -r requirements.txt
 python run.py
 ```
 
-On first run, `config.json` and `data/minecraft_archive.db` are created. Copy or edit `config.example.json` to change paths and defaults. Logs are written to `logs/minecraft_viewer.log`.
+`config.json` defaults `USER_FOLDER_ROOT` to `D:\DATA_LLM\SAMPLE_DATA\game_minecraft_exports`. The application creates `data/`, `output/`, and `logs/` beneath that root. The SQLite archive is `data/minecraft_archive.db`; map/3D caches and images are under `output/`; all application and 3D logs are under `logs/`. Existing user data in old code-local folders is not moved automatically.
 
 Use **Add World** for one directory containing `level.dat`, or **Scan Folder** to discover worlds below a selected folder. Long imports and map renders run outside the UI thread. Each scan creates a distinct import record; damaged optional player data or chunks produce a partial import while retaining successful records.
+
+Archive names are path-aware. A directly added generic `world` folder uses its parent folder name. During a recursive scan, the name is the path from the selected scan root down to the actual save; a trailing generic `world` component is omitted (for example, `2025/blah/world` becomes `2025/blah`). The original `level.dat` name remains stored separately. Rescan previously imported generic worlds from the desired common root to apply the full relative path.
+
+The **Summary** tab presents one sortable, horizontally scrollable row per world, including archive and level names, IDs, size, source/last-played/import dates, status and import count, chunk/dimension/region/player totals, versions, layout, game settings, spawn, seed and source folder. Selecting a summary row also selects that world in the sidebar.
 
 ## Supported saves
 
@@ -36,17 +40,17 @@ Open the Maps tab to browse a continuous world map. Visible 512×512-block regio
 - **Builds (likely)** highlights construction materials in gold over dimmed terrain. This uses visible surface materials, not edit history; naturally generated buildings may also be highlighted, and underground builds are not detected. Turn it off to return to the selected map layer.
 - Hover to see block, chunk and region coordinates. Enable the chunk/region grid for boundaries.
 
-Tiles are ordinary PNG cache files beneath `output/maps/tiles/`, separated by world, dimension, renderer version and layer. Terrain tiles are reused across imports; activity tiles remain tied to their import. Cache metadata records source path, timestamp, size, renderer version, layer and colour settings. Valid tiles load without decoding Minecraft data, including offline. Changed source regions or render settings cause a rebuild on the next load. Old standalone PNG exports are retained. Local maps, databases, configuration and logs are ignored by Git.
+Tiles are ordinary PNG cache files beneath `<USER_FOLDER_ROOT>/output/maps/tiles/`, separated by world, dimension, renderer version and layer. Terrain tiles are reused across imports; activity tiles remain tied to their import. Cache metadata records source path, timestamp, size, renderer version, layer and colour settings. Valid tiles load without decoding Minecraft data, including offline. Changed source regions or render settings cause a rebuild on the next load. Old standalone PNG exports are retained. Local maps, databases and logs are ignored by Git.
 
-Rendering uses WORLD_SURFACE heightmaps (or legacy HeightMap) and NumPy chunk/region arrays. Chunks without usable heightmaps use a vectorised fallback. The camera's region is queued first; visible tiles are displayed as each finishes. Up to four processes render missing tiles; set `map_render_workers` to 1–4 in `config.json` to adjust CPU use. Cached tiles load in an I/O thread, and pan/zoom reuse existing images. Per-region timings, cache hits, chunk counts and fast-path/fallback counts are logged to `logs/minecraft_viewer.log`. The upgraded renderer uses a new cache version, so the first visit rebuilds older tiles once.
+Rendering uses WORLD_SURFACE heightmaps (or legacy HeightMap) and NumPy chunk/region arrays. Chunks without usable heightmaps use a vectorised fallback. The camera's region is queued first; visible tiles are displayed as each finishes. Up to four processes render missing tiles; set `map_render_workers` to 1–4 in `config.json` to adjust CPU use. Cached tiles load in an I/O thread, and pan/zoom reuse existing images. Per-region timings, cache hits, chunk counts and fast-path/fallback counts are logged beneath `<USER_FOLDER_ROOT>/logs/`. The upgraded renderer uses a new cache version, so the first visit rebuilds older tiles once.
 
 ## Experimental 3D viewer
 
-Select an imported world and click **Open 3D View** on Overview. It opens an independent Ursina window; closing it leaves the archive application running. Install the updated requirements first. A working OpenGL graphics driver is needed. Source worlds remain read-only; visual snapshots are now written to the archive database.
+Select an imported world, open the **3D Viewer** tab immediately to the right of **Maps**, and click **Open 3D Viewer**. It opens an independent Ursina window; closing it leaves the archive application running. Install the updated requirements first. A working OpenGL graphics driver is needed. Source worlds remain read-only; visual snapshots are now written to the archive database.
 
-The camera starts above the Overworld spawn area. Detailed exposed-face chunk meshes cover roughly 192 blocks, with a simplified distant terrain shell out to 768 blocks. Select **Set Texture Source** to use a local Java client JAR or resource-pack ZIP; alternatively select the installation folder containing `versions`. Choose only one source. Server JARs and world folders do not contain the required block textures. Detailed cubes use textured faces; unavailable textures and distant terrain retain flat colours. Unsupported shapes use cubes, and deep underground terrain is omitted. Meshes are cached under `output/3d/cache/`, including source region timestamps, neighbouring-region changes and texture fingerprints.
+The camera starts above the Overworld spawn area. Detailed exposed-face chunk meshes cover roughly 192 blocks, with a simplified distant terrain shell out to 768 blocks. Select **Set Texture Source** to use a local Java client JAR or resource-pack ZIP; alternatively select the installation folder containing `versions`. Choose only one source. Server JARs and world folders do not contain the required block textures. Detailed cubes use textured faces; plants use crossed alpha-cutout planes and rails use thin top planes without hiding their supporting terrain. Standing and wall-mounted torches retain modern or legacy facing data. Unavailable textures and distant terrain retain flat colours. Other unsupported shapes use cubes, and deep underground terrain is omitted. Minecraft +Z remains south in displayed/exported coordinates; playback compensates for Ursina's opposite Z handedness. Meshes are cached under `output/3d/cache/`, including source region timestamps, neighbouring-region changes and texture fingerprints.
 
-Each finished load/reload archives geometry, atlas PNG, source texture/model assets and camera settings in database tables. **3D Exports → Refresh → Open Saved Scene** replays a snapshot without Minecraft or the original world/cache. **Save Portable Database** makes a consistent self-contained database backup. Exports cover the loaded area only, not the whole world or gameplay. Keep the viewer source and runtime alongside the database for long-term preservation. See [archive format and limitations](docs/3d_archive_format.md).
+Each finished load/reload archives geometry, atlas PNG, source texture/model assets and camera settings in database tables. **3D Viewer → Refresh Exports → Open Saved Scene** replays a snapshot without Minecraft or the original world/cache. **Save Portable Database** makes a consistent self-contained database backup. Exports cover the loaded area only, not the whole world or gameplay. Keep the viewer source and runtime alongside the database for long-term preservation. See [archive format and limitations](docs/3d_archive_format.md).
 
 3D loading decodes only sections intersecting the visible surface band, using compact numeric block IDs and a bounded neighbour-section cache. Distant terrain is grouped into up to 8×8 chunks per mesh and cached in batches. Packed vertex buffers and a 6 ms per-frame upload budget replace the fixed two-chunks-per-frame limit (a single upload may exceed the budget). Reload keeps unchanged meshes on the GPU; changed source regions invalidate affected meshes. The HUD counts completed chunks, including retained terrain and empty chunks, rather than draw calls.
 
@@ -58,10 +62,10 @@ Each finished load/reload archives geometry, atlas PNG, source texture/model ass
 - H: hide/show HUD; F2 or **Save Screenshot**: PNG capture without HUD.
 - Esc: release the mouse, return from Photo mode, or exit when already released. Click the scene to capture the mouse again.
 
-Screenshots go to `output/3d/worlds/<world_uuid>/renders/3d_<world_name>_<timestamp>.png`. Each has a JSON sidecar identifying it as `GENERATED_3D`, separate from historical screenshots. Cache, images and metadata remain ignored by Git. Logs are in `logs/viewer3d.log` (timings and errors) and `logs/viewer3d_console.log` (when launched from the app).
+Screenshots go to `<USER_FOLDER_ROOT>/output/3d/worlds/<world_uuid>/renders/3d_<world_name>_<timestamp>.png`. Each has a JSON sidecar identifying it as `GENERATED_3D`, separate from historical screenshots. Cache, images and metadata remain ignored by Git. Logs are beneath `<USER_FOLDER_ROOT>/logs/`.
 
 ```powershell
-python viewer3d.py --world-id 1 --db data/minecraft_archive.db --detailed-radius 192 --distant-radius 768
+python viewer3d.py --world-id 1 --db D:\DATA_LLM\SAMPLE_DATA\game_minecraft_exports\data\minecraft_archive.db --detailed-radius 192 --distant-radius 768
 ```
 
 Optional `--shadows` enables experimental shadow maps; default lighting works without them. This prototype has bounded loading, simplified cube shapes and static translucent water. Continuous streaming, exact Minecraft shapes/block-state orientation/animations, high-resolution offscreen photo export, entities, gameplay and other dimensions are deferred. Current-window PNG capture is supported.

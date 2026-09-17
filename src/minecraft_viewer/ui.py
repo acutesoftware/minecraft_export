@@ -9,6 +9,7 @@ import importlib.util
 import json
 import sqlite3
 from contextlib import closing
+from datetime import datetime,timezone
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -22,9 +23,10 @@ from .textures3d import find_client,validate_source
 
 
 class ViewerApp(tk.Tk):
-    def __init__(self, db: ArchiveDB, config: dict, root_path: Path):
+    def __init__(self,db:ArchiveDB,config:dict,root_path:Path,config_path:Path|None=None):
         super().__init__()
-        self.db, self.settings, self.root_path = db, config, root_path
+        self.db,self.settings,self.root_path=db,config,root_path
+        self.config_path=config_path or root_path/'config.json'
         self.selected_world: int | None = None
         self.events: queue.Queue = queue.Queue()
         self.import_jobs = 0
@@ -49,30 +51,30 @@ class ViewerApp(tk.Tk):
         buttons = ttk.Frame(left); buttons.pack(fill=tk.X, pady=5)
         ttk.Button(buttons, text="Add World", command=self.add_world).pack(side=tk.LEFT); ttk.Button(buttons, text="Scan", command=self.scan_folder).pack(side=tk.LEFT)
         self.tabs = ttk.Notebook(right); self.tabs.pack(fill=tk.BOTH, expand=True)
+        self.summary_tab=ttk.Frame(self.tabs);self.tabs.add(self.summary_tab,text='Summary');self._summary_ui()
         overview_frame = ttk.Frame(self.tabs); self.tabs.add(overview_frame, text="Overview")
         overview_tools = ttk.Frame(overview_frame); overview_tools.pack(fill=tk.X, pady=4)
         ttk.Button(overview_tools, text="Open Source Folder", command=self.open_source).pack(side=tk.LEFT, padx=3)
         ttk.Button(overview_tools, text="Import / Refresh", command=self.refresh_import).pack(side=tk.LEFT, padx=3)
-        ttk.Button(overview_tools, text="Browse Map", command=self.generate_default_maps).pack(side=tk.LEFT, padx=3)
-        ttk.Button(overview_tools, text="Open 3D View", command=self.open_3d).pack(side=tk.LEFT,padx=3)
-        texture_tools=ttk.Frame(overview_frame);texture_tools.pack(fill=tk.X,pady=3)
-        ttk.Button(texture_tools,text='Set Texture Source...',command=self.texture_source_dialog).pack(side=tk.LEFT,padx=3)
-        self.texture_label=ttk.Label(texture_tools,text=self.settings.get('texture_source','Automatic texture detection'))
-        self.texture_label.pack(side=tk.LEFT,padx=3)
         self.overview = tk.Text(overview_frame, wrap="word", padx=12, pady=12); self.overview.pack(fill=tk.BOTH, expand=True)
         self.players_tab = ttk.Frame(self.tabs); self.tabs.add(self.players_tab, text="Players")
         self._players_ui(); self.stats_tab = ttk.Frame(self.tabs); self.tabs.add(self.stats_tab, text="Stats & Advancements"); self._stats_ui()
         self.maps_tab = ttk.Frame(self.tabs); self.tabs.add(self.maps_tab, text="Maps"); self._maps_ui()
-        self.world_data = self._text_tab("World Data"); self.archive = self._table_tab("Archive", ("date", "source", "version", "layout", "status", "size"))
-        exports_frame=ttk.Frame(self.tabs);self.tabs.add(exports_frame,text='3D Exports')
-        export_tools=ttk.Frame(exports_frame);export_tools.pack(fill=tk.X)
-        ttk.Button(export_tools,text='Refresh',command=self.refresh_3d_exports).pack(side=tk.LEFT,padx=3)
+        viewer_frame=ttk.Frame(self.tabs);self.tabs.add(viewer_frame,text='3D Viewer')
+        viewer_tools=ttk.Frame(viewer_frame);viewer_tools.pack(fill=tk.X,pady=6)
+        ttk.Button(viewer_tools,text='Open 3D Viewer',command=self.open_3d).pack(side=tk.LEFT,padx=3)
+        ttk.Button(viewer_tools,text='Set Texture Source...',command=self.texture_source_dialog).pack(side=tk.LEFT,padx=3)
+        self.texture_label=ttk.Label(viewer_frame,text=self.settings.get('texture_source','Automatic texture detection'))
+        self.texture_label.pack(anchor='w',padx=6)
+        ttk.Label(viewer_frame,text='Live views save self-contained visual snapshots below. Select one to replay it without Minecraft or the source world.',wraplength=750).pack(anchor='w',padx=6,pady=6)
+        export_tools=ttk.Frame(viewer_frame);export_tools.pack(fill=tk.X)
+        ttk.Button(export_tools,text='Refresh Exports',command=self.refresh_3d_exports).pack(side=tk.LEFT,padx=3)
         ttk.Button(export_tools,text='Open Saved Scene',command=self.open_saved_3d).pack(side=tk.LEFT,padx=3)
         ttk.Button(export_tools,text='Save Portable Database...',command=self.backup_archive).pack(side=tk.LEFT,padx=3)
-        ttk.Label(exports_frame,text='Visual snapshots of loaded areas, not full-world/gameplay backups. Textures and geometry are embedded.').pack(anchor='w')
-        self.exports=ttk.Treeview(exports_frame,columns=('id','date','status','chunks','textures'),show='headings',selectmode='browse')
+        self.exports=ttk.Treeview(viewer_frame,columns=('id','date','status','chunks','textures'),show='headings',selectmode='browse')
         for name in self.exports['columns']:self.exports.heading(name,text=name.title())
-        self.exports.pack(fill=tk.BOTH,expand=True)
+        self.exports.pack(fill=tk.BOTH,expand=True,padx=3,pady=6)
+        self.world_data = self._text_tab("World Data"); self.archive = self._table_tab("Archive", ("date", "source", "version", "layout", "status", "size"))
         future = self._text_tab("Sessions & Screenshots")
         future.insert("1.0", "Server Sessions & Screenshots\n\nFuture functionality:\n- import Minecraft server logs\n- record player join/leave sessions\n- index screenshots\n- correlate screenshots with active worlds\n- build a combined world timeline")
         future.configure(state="disabled")
@@ -87,6 +89,77 @@ class ViewerApp(tk.Tk):
         frame = ttk.Frame(self.tabs); self.tabs.add(frame, text=title); tree = ttk.Treeview(frame, columns=columns, show="headings")
         for c in columns: tree.heading(c, text=c.replace("_", " ").title()); tree.column(c, width=120)
         tree.pack(fill=tk.BOTH, expand=True); return tree
+
+    def _summary_ui(self):
+        columns=('name','level_name','world_id','uuid','size','modified','imported','status','imports','chunks','dimensions',
+                 'regions','players','version','data_version','edition','layout','mode','difficulty','hardcore','spawn','last_played','seed','folder')
+        frame=ttk.Frame(self.summary_tab);frame.pack(fill=tk.BOTH,expand=True)
+        self.summary=ttk.Treeview(frame,columns=columns,show='headings',selectmode='browse')
+        widths={'name':220,'level_name':150,'world_id':65,'uuid':275,'size':90,'modified':165,'imported':165,'status':85,'imports':70,'chunks':100,
+                'dimensions':85,'regions':75,'players':70,'version':100,'data_version':95,'edition':65,'layout':125,'mode':85,
+                'difficulty':80,'hardcore':75,'spawn':145,'last_played':130,'seed':170,'folder':520}
+        for column in columns:
+            self.summary.heading(column,text=column.replace('_',' ').title(),command=lambda c=column:self._sort_summary(c,False))
+            self.summary.column(column,width=widths.get(column,110),minwidth=55,stretch=False)
+        vertical=ttk.Scrollbar(frame,orient=tk.VERTICAL,command=self.summary.yview)
+        horizontal=ttk.Scrollbar(frame,orient=tk.HORIZONTAL,command=self.summary.xview)
+        self.summary.configure(yscrollcommand=vertical.set,xscrollcommand=horizontal.set)
+        self.summary.grid(row=0,column=0,sticky='nsew');vertical.grid(row=0,column=1,sticky='ns');horizontal.grid(row=1,column=0,sticky='ew')
+        frame.rowconfigure(0,weight=1);frame.columnconfigure(0,weight=1)
+        self.summary.bind('<<TreeviewSelect>>',self._select_summary_world)
+
+    def _sort_summary(self,column,reverse):
+        numeric={'world_id','imports','chunks','dimensions','regions','players','data_version'}
+        def key(item):
+            value=self.summary.set(item,column)
+            if column=='size':
+                try:
+                    number,unit=value.split()[:2];return float(number)*{'B':1,'KB':1024,'MB':1024**2,'GB':1024**3,'TB':1024**4}[unit]
+                except (ValueError,KeyError,IndexError):return -1
+            if column in numeric:
+                try:return int(value.replace(',','').split()[0])
+                except (ValueError,IndexError):return -1
+            return value.casefold()
+        items=sorted(self.summary.get_children(''),key=key,reverse=reverse)
+        for index,item in enumerate(items):self.summary.move(item,'',index)
+        self.summary.heading(column,command=lambda:self._sort_summary(column,not reverse))
+
+    def _select_summary_world(self,_=None):
+        selection=self.summary.selection()
+        if not selection:return
+        world_id=selection[0]
+        if self.worlds.exists(world_id):self.worlds.selection_set(world_id);self.worlds.see(world_id);self._select_world()
+
+    @staticmethod
+    def _format_size(value):
+        size=float(value or 0)
+        for unit in ('B','KB','MB','GB','TB'):
+            if size<1024 or unit=='TB':return f'{size:.1f} {unit}' if unit!='B' else f'{int(size)} B'
+            size/=1024
+
+    def refresh_summary(self):
+        self.summary.delete(*self.summary.get_children())
+        sql="""WITH latest AS (SELECT world_id,MAX(import_id) import_id FROM mc_import GROUP BY world_id),
+            dims AS (SELECT import_id,SUM(chunk_count) chunks,COUNT(*) dimensions,SUM(region_file_count) regions FROM mc_dimension GROUP BY import_id),
+            players AS (SELECT world_id,COUNT(*) players FROM mc_player GROUP BY world_id)
+            SELECT w.world_id,COALESCE(w.display_name,w.world_name),w.world_name,w.world_uuid,i.source_size_bytes,i.source_modified_at,
+                   i.completed_at,i.status,(SELECT COUNT(*) FROM mc_import ci WHERE ci.world_id=w.world_id),
+                   COALESCE(d.chunks,0),COALESCE(d.dimensions,0),COALESCE(d.regions,0),COALESCE(p.players,0),
+                   w.minecraft_version,w.data_version,w.edition,i.layout_type,w.game_type,w.difficulty,w.hardcore,
+                   w.spawn_x,w.spawn_y,w.spawn_z,w.last_played,w.seed,s.source_path
+            FROM mc_world w LEFT JOIN latest l USING(world_id) LEFT JOIN mc_import i ON i.import_id=l.import_id
+            LEFT JOIN mc_world_source s ON s.world_source_id=i.world_source_id LEFT JOIN dims d ON d.import_id=i.import_id
+            LEFT JOIN players p USING(world_id) ORDER BY COALESCE(w.display_name,w.world_name) COLLATE NOCASE"""
+        for row in self.db.rows(sql):
+            played=''
+            if row[23]:
+                try:played=datetime.fromtimestamp(float(row[23])/1000,timezone.utc).isoformat()
+                except (ValueError,OSError,OverflowError):played=str(row[23])
+            values=(row[1],row[2],row[0],row[3],self._format_size(row[4]),row[5] or '',row[6] or '',row[7] or '',row[8],
+                    f'{row[9]:,}',row[10],row[11],row[12],row[13] or '',row[14] if row[14] is not None else '',row[15] or '',
+                    row[16] or '',row[17] or '',row[18] or '','Yes' if row[19] else 'No',f'{row[20]}, {row[21]}, {row[22]}',
+                    played,row[24] or '',row[25] or '')
+            self.summary.insert('', 'end',iid=str(row[0]),values=values)
 
     def _players_ui(self):
         paned = ttk.Panedwindow(self.players_tab, orient=tk.HORIZONTAL); paned.pack(fill=tk.BOTH, expand=True)
@@ -118,8 +191,9 @@ class ViewerApp(tk.Tk):
 
     def refresh_worlds(self):
         self.worlds.delete(*self.worlds.get_children())
-        for row in self.db.rows("SELECT world_id,world_name FROM mc_world ORDER BY world_name"):
+        for row in self.db.rows("SELECT world_id,COALESCE(display_name,world_name) FROM mc_world ORDER BY COALESCE(display_name,world_name) COLLATE NOCASE"):
             self.worlds.insert("", "end", iid=str(row[0]), text=row[1])
+        self.refresh_summary()
 
     def _select_world(self, _=None):
         selection = self.worlds.selection()
@@ -131,7 +205,7 @@ class ViewerApp(tk.Tk):
         w = self.db.row("SELECT * FROM mc_world WHERE world_id=?", (self.selected_world,)); s = self.db.row("SELECT * FROM mc_world_source WHERE world_id=? ORDER BY last_seen_at DESC LIMIT 1", (self.selected_world,))
         dims = self.db.rows("SELECT dimension_key,chunk_count FROM mc_dimension WHERE import_id=(SELECT MAX(import_id) FROM mc_import WHERE world_id=?)", (self.selected_world,))
         players = self.db.rows("SELECT * FROM mc_player WHERE world_id=?", (self.selected_world,))
-        lines = [f"World name: {w['world_name']}", f"Source folder: {s['source_path'] if s else ''}", f"Edition: {w['edition']}", f"Minecraft / data version: {w['minecraft_version']} / {w['data_version']}", f"Seed: {w['seed']}", f"Game mode: {w['game_type']}", f"Difficulty: {w['difficulty']}", f"Hardcore: {bool(w['hardcore'])}", f"Spawn: {w['spawn_x']}, {w['spawn_y']}, {w['spawn_z']}", "", "Dimensions:"] + [f"  {d[0]}: {d[1]:,} chunks" for d in dims] + ["", f"Players: {len(players)}", f"Last import: {w['last_imported_at']}"]
+        lines = [f"Archive name: {w['display_name'] or w['world_name']}",f"Level name: {w['world_name']}", f"Source folder: {s['source_path'] if s else ''}", f"Edition: {w['edition']}", f"Minecraft / data version: {w['minecraft_version']} / {w['data_version']}", f"Seed: {w['seed']}", f"Game mode: {w['game_type']}", f"Difficulty: {w['difficulty']}", f"Hardcore: {bool(w['hardcore'])}", f"Spawn: {w['spawn_x']}, {w['spawn_y']}, {w['spawn_z']}", "", "Dimensions:"] + [f"  {d[0]}: {d[1]:,} chunks" for d in dims] + ["", f"Players: {len(players)}", f"Last import: {w['last_imported_at']}"]
         self._replace(self.overview, "\n".join(lines)); self.player_list.delete(*self.player_list.get_children())
         names = []
         for p in players: self.player_list.insert("", "end", iid=str(p[0]), values=(p[2], p[3] or "")); names.append(f"{p[2]} | {p[0]}")
@@ -155,7 +229,7 @@ class ViewerApp(tk.Tk):
         worlds = discover_worlds(path, recursive=True)
         if not worlds: messagebox.showinfo("Scan Folder", "No Java worlds were found."); return
         if messagebox.askyesno("Scan Folder", f"Found {len(worlds)} world(s). Import all? "):
-            self._run(lambda: [import_world(self.db, p, self._post_status) for p in worlds], self._import_done)
+            self._run(lambda: [import_world(self.db,p,self._post_status,scan_root=path) for p in worlds],self._import_done)
 
     def _start_import(self, path): self._run(lambda: import_world(self.db, path, self._post_status), self._import_done)
     def _selected_source(self):
@@ -186,7 +260,8 @@ class ViewerApp(tk.Tk):
         except (OSError,ValueError) as exc:
             messagebox.showerror('Texture source',str(exc));return
         self.settings['texture_source']=path
-        (self.root_path/'config.json').write_text(json.dumps(self.settings,indent=2),encoding='utf-8')
+        persisted={key:value for key,value in self.settings.items() if key not in ('database_path','map_output_path')}
+        self.config_path.write_text(json.dumps(persisted,indent=2),encoding='utf-8')
         self.texture_label.configure(text=path)
 
     def refresh_3d_exports(self):
@@ -198,9 +273,9 @@ class ViewerApp(tk.Tk):
 
     def open_saved_3d(self):
         selection=self.exports.selection()
-        if not selection:messagebox.showinfo('3D Exports','Select a completed or partial export first.');return
+        if not selection:messagebox.showinfo('3D Viewer','Select a completed or partial export first.');return
         row=self.db.row('SELECT status FROM mc_3d_export WHERE export_id=?',(int(selection[0]),))
-        if row['status'] not in ('complete','partial'):messagebox.showinfo('3D Exports','This export did not finish. Open the live world to create a new export.');return
+        if row['status'] not in ('complete','partial'):messagebox.showinfo('3D Viewer','This export did not finish. Open the live world to create a new export.');return
         self.open_3d(int(selection[0]))
 
     def backup_archive(self):
@@ -230,7 +305,8 @@ class ViewerApp(tk.Tk):
             messagebox.showerror('3D Viewer','Install the updated dependencies: pip install -r requirements.txt');return
         try:
             command=[sys.executable,'-m','minecraft_viewer.viewer3d','--world-id',str(self.selected_world),
-                     '--db',str(self.db.path.resolve()),'--output',str((self.root_path/'output'/'3d').resolve())]
+                     '--db',str(self.db.path.resolve()),'--output',str((self.root_path/'output'/'3d').resolve()),
+                     '--log',str((self.root_path/'logs'/'viewer3d.log').resolve())]
             if export_id:command+=['--export-id',str(export_id)]
             elif self.settings.get('texture_source'):
                 validate_source(find_client(self.settings['texture_source']))
@@ -246,7 +322,7 @@ class ViewerApp(tk.Tk):
                 code=process.poll()
                 if code is None:self.after(2000,check_viewer)
                 elif code!=0:
-                    messagebox.showerror('3D Viewer','The experimental viewer stopped with an error. See logs/viewer3d.log and logs/viewer3d_console.log for details.')
+                    messagebox.showerror('3D Viewer',f'The experimental viewer stopped with an error. See {logs} for details.')
             self.after(2000,check_viewer)
         except (OSError,ValueError) as exc:messagebox.showerror('3D Viewer',str(exc))
     def open_source(self):

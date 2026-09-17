@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 class ClosingConnection(sqlite3.Connection):
@@ -34,6 +34,24 @@ class ArchiveDB:
         with self.connect() as con:
             con.executescript(schema)
             current = con.execute("SELECT COALESCE(MAX(version), 0) FROM app_schema_version").fetchone()[0]
+            world_columns={row[1] for row in con.execute('PRAGMA table_info(mc_world)')}
+            if 'display_name' not in world_columns:
+                con.execute('ALTER TABLE mc_world ADD COLUMN display_name TEXT')
+            source_columns={row[1] for row in con.execute('PRAGMA table_info(mc_world_source)')}
+            if 'scan_root' not in source_columns:con.execute('ALTER TABLE mc_world_source ADD COLUMN scan_root TEXT')
+            if 'relative_name' not in source_columns:con.execute('ALTER TABLE mc_world_source ADD COLUMN relative_name TEXT')
+            # Existing generic saves get an immediately useful label. A later
+            # scan can replace it with the full path relative to its scan root.
+            con.execute("""UPDATE mc_world SET display_name=(
+                SELECT CASE WHEN lower(replace(s.source_path,'\\','/')) LIKE '%/world'
+                    THEN substr(replace(s.source_path,'\\','/'),1,length(replace(s.source_path,'\\','/'))-6)
+                    ELSE w.world_name END
+                FROM mc_world w JOIN mc_world_source s ON s.world_id=w.world_id
+                WHERE w.world_id=mc_world.world_id ORDER BY s.last_seen_at DESC LIMIT 1)
+                WHERE display_name IS NULL AND lower(world_name)='world'""")
+            rows=con.execute("SELECT world_id,display_name FROM mc_world WHERE display_name LIKE '%/%'").fetchall()
+            for world_id,name in rows:
+                con.execute('UPDATE mc_world SET display_name=? WHERE world_id=?',(name.rstrip('/').split('/')[-1],world_id))
             if current < SCHEMA_VERSION:
                 con.execute("INSERT INTO app_schema_version(version, applied_at) VALUES (?, datetime('now'))", (SCHEMA_VERSION,))
 

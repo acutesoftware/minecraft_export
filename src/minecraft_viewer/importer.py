@@ -18,30 +18,50 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def import_world(db: ArchiveDB, source: str | Path, progress: Callable[[str], None] = lambda _: None) -> tuple[int, int, str]:
+def archive_display_name(source: Path, level_name: str, scan_root: str | Path | None = None) -> tuple[str,str | None]:
+    """Human archive label plus relative path, independent of level.dat's generic name."""
+    source=source.resolve();root=Path(scan_root).resolve() if scan_root else None
+    relative=None
+    if root:
+        try:parts=list(source.relative_to(root).parts);relative=Path(*parts).as_posix() if parts else source.name
+        except ValueError:parts=[]
+    else:parts=[]
+    if parts and parts[-1].lower()=='world':parts.pop()
+    if parts:name='/'.join(parts)
+    elif source.name.lower()=='world':name=source.parent.name
+    else:name=level_name or source.name
+    return name or source.name,relative
+
+
+def import_world(db: ArchiveDB, source: str | Path, progress: Callable[[str], None] = lambda _: None,
+                 scan_root: str | Path | None = None) -> tuple[int, int, str]:
     """Import a world. Optional-stage failures produce a durable PARTIAL import."""
     source = Path(source).resolve()
+    if scan_root is None:
+        previous=db.row('SELECT scan_root FROM mc_world_source WHERE source_path=? ORDER BY last_seen_at DESC LIMIT 1',(str(source),))
+        if previous and previous[0]:scan_root=previous[0]
     progress("Reading level.dat...")
     reader = JavaWorldReader(source)
     metadata = reader.read_world_metadata()
+    display_name,relative_name=archive_display_name(source,metadata.name,scan_root)
     timestamp = now()
     warnings: list[str] = []
     with db.connect() as con:
         existing = con.execute("SELECT w.world_id FROM mc_world w JOIN mc_world_source s USING(world_id) WHERE s.source_path=?", (str(source),)).fetchone()
         if existing:
             world_id = existing[0]
-            con.execute("UPDATE mc_world SET world_name=?, seed=?, data_version=?, minecraft_version=?, game_type=?, difficulty=?, hardcore=?, allow_commands=?, spawn_x=?, spawn_y=?, spawn_z=?, world_time=?, day_time=?, last_played=?, last_imported_at=? WHERE world_id=?",
-                        (metadata.name, metadata.seed, metadata.data_version, metadata.minecraft_version, metadata.game_type, metadata.difficulty, metadata.hardcore, metadata.allow_commands, metadata.spawn_x, metadata.spawn_y, metadata.spawn_z, metadata.world_time, metadata.day_time, metadata.last_played, timestamp, world_id))
+            con.execute("UPDATE mc_world SET world_name=?,display_name=?, seed=?, data_version=?, minecraft_version=?, game_type=?, difficulty=?, hardcore=?, allow_commands=?, spawn_x=?, spawn_y=?, spawn_z=?, world_time=?, day_time=?, last_played=?, last_imported_at=? WHERE world_id=?",
+                        (metadata.name,display_name,metadata.seed, metadata.data_version, metadata.minecraft_version, metadata.game_type, metadata.difficulty, metadata.hardcore, metadata.allow_commands, metadata.spawn_x, metadata.spawn_y, metadata.spawn_z, metadata.world_time, metadata.day_time, metadata.last_played, timestamp, world_id))
         else:
-            cur = con.execute("INSERT INTO mc_world(world_uuid,world_name,edition,seed,data_version,minecraft_version,game_type,difficulty,hardcore,allow_commands,spawn_x,spawn_y,spawn_z,world_time,day_time,last_played,first_imported_at,last_imported_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                              (str(uuid.uuid4()), metadata.name, "JAVA", metadata.seed, metadata.data_version, metadata.minecraft_version, metadata.game_type, metadata.difficulty, metadata.hardcore, metadata.allow_commands, metadata.spawn_x, metadata.spawn_y, metadata.spawn_z, metadata.world_time, metadata.day_time, metadata.last_played, timestamp, timestamp))
+            cur = con.execute("INSERT INTO mc_world(world_uuid,world_name,display_name,edition,seed,data_version,minecraft_version,game_type,difficulty,hardcore,allow_commands,spawn_x,spawn_y,spawn_z,world_time,day_time,last_played,first_imported_at,last_imported_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                              (str(uuid.uuid4()),metadata.name,display_name,"JAVA",metadata.seed,metadata.data_version,metadata.minecraft_version,metadata.game_type,metadata.difficulty,metadata.hardcore,metadata.allow_commands,metadata.spawn_x,metadata.spawn_y,metadata.spawn_z,metadata.world_time,metadata.day_time,metadata.last_played,timestamp,timestamp))
             world_id = cur.lastrowid
         row = con.execute("SELECT world_source_id FROM mc_world_source WHERE world_id=? AND source_path=?", (world_id, str(source))).fetchone()
         if row:
             source_id = row[0]
-            con.execute("UPDATE mc_world_source SET last_seen_at=?,is_current=1 WHERE world_source_id=?", (timestamp, source_id))
+            con.execute("UPDATE mc_world_source SET last_seen_at=?,is_current=1,scan_root=?,relative_name=? WHERE world_source_id=?", (timestamp,str(Path(scan_root).resolve()) if scan_root else None,relative_name,source_id))
         else:
-            source_id = con.execute("INSERT INTO mc_world_source(world_id,source_path,source_type,first_seen_at,last_seen_at,is_current) VALUES (?,?,?,?,?,1)", (world_id, str(source), "save", timestamp, timestamp)).lastrowid
+            source_id = con.execute("INSERT INTO mc_world_source(world_id,source_path,source_type,first_seen_at,last_seen_at,is_current,scan_root,relative_name) VALUES (?,?,?,?,?,1,?,?)", (world_id,str(source),"save",timestamp,timestamp,str(Path(scan_root).resolve()) if scan_root else None,relative_name)).lastrowid
         stat = (source / "level.dat").stat()
         import_id = con.execute("INSERT INTO mc_import(world_id,world_source_id,started_at,source_modified_at,source_size_bytes,layout_type,data_version,status) VALUES (?,?,?,?,?,?,?,'RUNNING')",
                                 (world_id, source_id, timestamp, datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(), _folder_size(source), reader.layout.layout_type.value, metadata.data_version)).lastrowid
@@ -101,4 +121,3 @@ def _folder_size(root: Path) -> int:
             try: total += (Path(base) / name).stat().st_size
             except OSError: pass
     return total
-

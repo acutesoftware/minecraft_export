@@ -11,13 +11,13 @@ import numpy as np
 from .java_reader import JavaWorldReader, LEGACY_BLOCKS, unpack_values, surface_arrays
 from .map_renderer import block_color
 
-VERSION = 'mesh-4'
+VERSION = 'mesh-8'
 ARRAYS=('vertices','normals','colors','uvs')
 AIR = ('minecraft:air','minecraft:cave_air','minecraft:void_air')
 LEGACY_MATERIALS = {**LEGACY_BLOCKS, 6:'minecraft:oak_sapling', 32:'minecraft:dead_bush',
     37:'minecraft:dandelion',38:'minecraft:poppy',50:'minecraft:torch',54:'minecraft:chest',
     58:'minecraft:crafting_table',60:'minecraft:farmland',61:'minecraft:furnace',62:'minecraft:furnace',
-    85:'minecraft:oak_fence',95:'minecraft:glass',102:'minecraft:glass_pane',
+    75:'minecraft:redstone_torch',76:'minecraft:redstone_torch',85:'minecraft:oak_fence',95:'minecraft:glass',102:'minecraft:glass_pane',
     125:'minecraft:oak_slab',126:'minecraft:oak_slab',134:'minecraft:spruce_stairs',
     135:'minecraft:birch_stairs',136:'minecraft:jungle_stairs',160:'minecraft:glass_pane',
     161:'minecraft:acacia_leaves',162:'minecraft:acacia_log',163:'minecraft:acacia_stairs',
@@ -25,8 +25,21 @@ LEGACY_MATERIALS = {**LEGACY_BLOCKS, 6:'minecraft:oak_sapling', 32:'minecraft:de
 
 
 def minecraft_to_renderer(x,y,z):
-    # Ursina uses Y up; retain Minecraft's X/Y/Z with no coordinate inversion.
-    return (x,y,z)
+    # Minecraft +Z is south; reflect it for Ursina's opposite handedness.
+    return (x,y,-z)
+
+
+def renderer_to_minecraft(x,y,z):return (x,y,-z)
+
+
+def mesh_to_renderer(data):
+    """Reflect local Z and restore clockwise winding after reflection."""
+    result={key:np.asarray(data[key]).copy() for key in ARRAYS}
+    result['vertices'][:,2]*=-1;result['normals'][:,2]*=-1
+    for key in ARRAYS:
+        values=result[key].reshape(-1,3,result[key].shape[1])
+        values[:,[1,2]]=values[:,[2,1]]
+    return result
 
 
 def decode_volume(chunk):
@@ -68,8 +81,85 @@ FACES=[((1,0,0),[(1,0,0),(1,1,0),(1,1,1),(1,0,1)]),
        ((0,0,1),[(1,0,1),(1,1,1),(0,1,1),(0,0,1)]),
        ((0,0,-1),[(0,0,0),(0,1,0),(1,1,0),(1,0,0)])]
 
+CROSS_WORDS=('grass','fern','flower','sapling','mushroom','bush','tulip','orchid','dandelion','poppy',
+             'allium','azure_bluet','lily_of_the_valley','cornflower','wheat','carrots','potatoes','beetroots','sugar_cane')
 
-def mesh_volume(padded, low, heights, colors, depth=16, materials=None, atlas=None, block_names=None):
+
+def render_shape(name):
+    """Approximate common non-solid Minecraft models without hiding geometry behind them."""
+    ident=name.split(':')[-1]
+    if 'rail' in ident:return 'rail'
+    if ident in ('torch','wall_torch','redstone_torch','redstone_wall_torch','soul_torch','soul_wall_torch'):return 'torch'
+    if any(word in ident for word in CROSS_WORDS) and not ident.endswith(('grass_block','moss_block')):return 'cross'
+    return 'cube'
+
+
+def legacy_properties(block_id,data):
+    if block_id in (50,75,76):
+        return {'facing':{1:'east',2:'west',3:'south',4:'north',5:'up'}.get(data,'up')}
+    if block_id==66:
+        return {'shape':('north_south','east_west','ascending_east','ascending_west','ascending_north',
+                         'ascending_south','south_east','south_west','north_west','north_east')[min(data,9)]}
+    return {}
+
+
+def _special_geometry(blocks,band,low,palette,atlas,block_names,block_properties,block_shapes,numeric):
+    vertices=[];normals=[];rgba=[];uvs=[]
+    unique=np.unique(blocks[band])
+    for block_id in unique:
+        name=block_names[int(block_id)] if numeric else str(block_id)
+        shape=block_shapes[int(block_id)] if numeric and block_shapes else render_shape(name)
+        if shape in ('cube','cutout_cube'):continue
+        mask=(blocks==block_id)&band
+        yy,zz,xx=np.nonzero(mask)
+        if not len(xx):continue
+        base=np.column_stack((xx,yy+low,zz)).astype(np.float32)
+        if shape=='rail':
+            quads=np.array([[(0,.0625,0),(1,.0625,1),(1,.0625,0),(0,.0625,0),(0,.0625,1),(1,.0625,1)]],dtype=np.float32)
+            direction='up';normal=(0,1,0)
+        elif shape=='cross':
+            # Two crossed sheets. Duplicate reversed triangles so cutouts are visible from both sides.
+            quads=np.array([[ (0,0,0),(1,1,1),(1,0,1),(0,0,0),(0,1,0),(1,1,1),
+                              (0,0,0),(1,0,1),(1,1,1),(0,0,0),(1,1,1),(0,1,0)],
+                            [ (1,0,0),(0,1,1),(0,0,1),(1,0,0),(1,1,0),(0,1,1),
+                              (1,0,0),(0,0,1),(0,1,1),(1,0,0),(0,1,1),(1,1,0)]],dtype=np.float32)
+            direction='north';normal=(0,0,1)
+        else:
+            properties=block_properties[int(block_id)] if numeric and block_properties else {}
+            facing=properties.get('facing','up')
+            if facing in ('north','south'):
+                z0,z1=(.02,.42) if facing=='north' else (.98,.58)
+                quads=np.array([[(.38,.2,z0),(.62,.8,z1),(.38,.8,z1),(.38,.2,z0),(.62,.2,z0),(.62,.8,z1),
+                                 (.38,.2,z0),(.38,.8,z1),(.62,.8,z1),(.38,.2,z0),(.62,.8,z1),(.62,.2,z0)]],dtype=np.float32)
+                direction=facing;normal=(0,0,1)
+            elif facing in ('east','west'):
+                x0,x1=(.98,.58) if facing=='east' else (.02,.42)
+                quads=np.array([[(x0,.2,.38),(x1,.8,.62),(x1,.8,.38),(x0,.2,.38),(x0,.2,.62),(x1,.8,.62),
+                                 (x0,.2,.38),(x1,.8,.38),(x1,.8,.62),(x0,.2,.38),(x1,.8,.62),(x0,.2,.62)]],dtype=np.float32)
+                direction=facing;normal=(1,0,0)
+            else:
+                quads=np.array([[ (.4,0,.5),(.6,.65,.5),(.4,.65,.5),(.4,0,.5),(.6,0,.5),(.6,.65,.5),
+                                  (.5,0,.4),(.5,.65,.6),(.5,.65,.4),(.5,0,.4),(.5,0,.6),(.5,.65,.6)]],dtype=np.float32)
+                direction='north';normal=(0,0,1)
+        geometry=(base[:,None,None,:]+quads[None,:,:,:]).reshape(-1,3)
+        vertices.append(geometry)
+        normals.append(np.tile(normal,(len(geometry),1)))
+        colour=np.asarray(palette[int(block_id)] if numeric else palette[name],dtype=np.float32)
+        properties=block_properties[int(block_id)] if numeric and block_properties else {}
+        uv,found,tinted=atlas.face(name,direction,properties) if atlas else (np.tile([0,1],(6,1)),False,False)
+        if found and not tinted:colour[:3]=1
+        if shape in ('cross','torch'):
+            u0,u1=float(uv[:,0].min()),float(uv[:,0].max());v0,v1=float(uv[:,1].min()),float(uv[:,1].max())
+            front=np.array([(u0,v0),(u1,v1),(u1,v0),(u0,v0),(u0,v1),(u1,v1)],dtype=np.float32)
+            back=np.array([(u0,v0),(u1,v0),(u1,v1),(u0,v0),(u1,v1),(u0,v1)],dtype=np.float32)
+            sheet=np.concatenate((front,back))
+            special_uv=np.tile(sheet,(len(geometry)//len(sheet),1))
+        else:special_uv=np.tile(uv,(len(geometry)//len(uv),1))
+        uvs.append(special_uv);rgba.append(np.tile(colour,(len(geometry),1)))
+    return vertices,normals,rgba,uvs
+
+
+def mesh_volume(padded, low, heights, colors, depth=16, materials=None, atlas=None, block_names=None, block_properties=None, block_shapes=None):
     """Cull using real neighbours, including chunk edges and underground cutoff."""
     blocks=padded[1:-1,1:-1,1:-1]
     numeric=materials is not None
@@ -79,15 +169,21 @@ def mesh_volume(padded, low, heights, colors, depth=16, materials=None, atlas=No
     if numeric:
         palette=np.asarray(materials,dtype=np.float32)
         transparent=palette[blocks,3]<1
+        shapes=np.asarray(block_shapes,dtype=object) if block_shapes else np.array([render_shape(name) for name in block_names],dtype=object) if block_names else np.full(len(materials),'cube',dtype=object)
+        cube=np.isin(shapes[blocks],('cube','cutout_cube'))
+        neighbor_occludes=shapes[padded]=='cube'
     else:
         palette={str(n):material(str(n),colors) for n in np.unique(blocks)}
         translucent_ids=[n for n in np.unique(padded) if 'water' in str(n) or 'glass' in str(n)]
         transparent=np.isin(blocks,translucent_ids)
+        cube=np.vectorize(lambda name:render_shape(str(name))=='cube')(blocks)
+        neighbor_occludes=np.vectorize(lambda name:render_shape(str(name))=='cube')(padded)
     for face_index,((dx,dy,dz),corners) in enumerate(FACES):
         neighbor=padded[1+dy:1+dy+blocks.shape[0],1+dz:17+dz,1+dx:17+dx]
         air=neighbor==0 if numeric else np.isin(neighbor,AIR)
         translucent=palette[neighbor,3]<1 if numeric else np.isin(neighbor,translucent_ids)
-        exposed=occupied & band & (air | (translucent & ~transparent))
+        occludes=neighbor_occludes[1+dy:1+dy+blocks.shape[0],1+dz:17+dz,1+dx:17+dx]
+        exposed=occupied & cube & band & (air | ~occludes | (translucent & ~transparent))
         yy,zz,xx=np.nonzero(exposed)
         if not len(xx):continue
         origins=np.column_stack((xx,yy+low,zz))
@@ -101,11 +197,14 @@ def mesh_volume(padded, low, heights, colors, depth=16, materials=None, atlas=No
             from .textures3d import FACE_NAMES
             ids=blocks[yy,zz,xx]
             for block_id in np.unique(ids):
-                uv,found,tinted=atlas.face(block_names[int(block_id)],FACE_NAMES[face_index])
+                properties=block_properties[int(block_id)] if block_properties else {}
+                uv,found,tinted=atlas.face(block_names[int(block_id)],FACE_NAMES[face_index],properties)
                 mask=ids==block_id;face_uv[mask]=uv
                 if found and not tinted:face_colors[mask,:3]=1
         uvs.append(face_uv.reshape(-1,2))
         rgba.append(np.repeat(face_colors,6,axis=0))
+    special=_special_geometry(blocks,band,low,palette,atlas,block_names,block_properties,block_shapes,numeric) if (not numeric or block_names) else ([],[],[],[])
+    for target,values in zip((vertices,normals,rgba,uvs),special):target.extend(values)
     if not vertices:return empty_mesh()
     return {'vertices':np.concatenate(vertices).astype('float32'),'normals':np.concatenate(normals).astype('float32'),'colors':np.concatenate(rgba).astype('float32'),'uvs':np.concatenate(uvs)}
 
@@ -150,21 +249,27 @@ class MeshWorld:
         self.colors=json.loads(Path(__file__).with_name('data').joinpath('block_colors.json').read_text())
         self.chunks=OrderedDict()
         self.sections=OrderedDict()
-        self.block_ids={name:0 for name in AIR}
+        self.block_ids={(name,()):0 for name in AIR}
         self.materials=[(0,0,0,0)]
         self.block_names=['minecraft:air']
+        self.block_properties=[{}]
+        self.block_shapes=['cube']
         self.region_stamps={}
         self.signatures={}
 
     def begin_reload(self):
         self.chunks.clear();self.sections.clear();self.region_stamps.clear();self.signatures.clear()
 
-    def block_id(self,name):
-        if name not in self.block_ids:
-            self.block_ids[name]=len(self.materials)
+    def block_id(self,name,properties=None):
+        properties={str(k):str(v) for k,v in (properties or {}).items()}
+        key=(name,tuple(sorted(properties.items())))
+        if key not in self.block_ids:
+            self.block_ids[key]=len(self.materials)
             self.materials.append(material(name,self.colors))
             self.block_names.append(name)
-        return self.block_ids[name]
+            self.block_properties.append(properties)
+            self.block_shapes.append(self.atlas.render_shape(name,properties) if self.atlas else render_shape(name))
+        return self.block_ids[key]
 
     def section(self,x,z,sy):
         key=(x,z,sy)
@@ -175,13 +280,19 @@ class MeshWorld:
             state=section.get('block_states',{})
             palette=state.get('palette',section.get('Palette',[]))
             if palette:
-                ids=np.array([self.block_id(str(p.get('Name','minecraft:air'))) for p in palette],dtype=np.uint32)
+                ids=np.array([self.block_id(str(p.get('Name','minecraft:air')),p.get('Properties')) for p in palette],dtype=np.uint32)
                 indices=unpack_values(state.get('data',section.get('BlockStates',[])),np.arange(4096),max(4,(len(ids)-1).bit_length()),int(chunk.get('DataVersion',0))>=2529)
                 result=ids[indices].reshape(16,16,16)
             elif len(section.get('Blocks',[]))==4096:
-                ids=np.asarray(section['Blocks'],dtype=np.int64)&255
-                lookup=np.array([self.block_id(LEGACY_MATERIALS.get(i,'minecraft:unknown')) for i in range(256)],dtype=np.uint32)
-                result=lookup[ids].reshape(16,16,16)
+                legacy_ids=np.asarray(section['Blocks'],dtype=np.int64)&255
+                packed_data=np.asarray(section.get('Data',np.zeros(2048)),dtype=np.uint8)&255
+                metadata=np.zeros(4096,dtype=np.uint8)
+                metadata[0::2]=packed_data&15;metadata[1::2]=packed_data>>4
+                pairs=legacy_ids*16+metadata
+                lookup={int(pair):self.block_id(LEGACY_MATERIALS.get(int(pair)//16,'minecraft:unknown'),
+                                                 legacy_properties(int(pair)//16,int(pair)%16))
+                        for pair in np.unique(pairs)}
+                result=np.array([lookup[int(pair)] for pair in pairs],dtype=np.uint32).reshape(16,16,16)
             else:result=np.zeros((16,16,16),dtype=np.uint32)
             self.sections[key]=result
         self.sections.move_to_end(key)
@@ -293,7 +404,7 @@ class MeshWorld:
             for dx,dz in ((-1,0),(1,0),(0,-1),(0,1)):
                 if dx:padded[:,1:-1,0 if dx<0 else 17]=self.band(x+dx,z,low-1,top+1,('x',15 if dx<0 else 0))
                 else:padded[:,0 if dz<0 else 17,1:-1]=self.band(x,z+dz,low-1,top+1,('z',15 if dz<0 else 0))
-            result=mesh_volume(padded,low,heights,self.colors,materials=self.materials,atlas=self.atlas,block_names=self.block_names)
+            result=mesh_volume(padded,low,heights,self.colors,materials=self.materials,atlas=self.atlas,block_names=self.block_names,block_properties=self.block_properties,block_shapes=self.block_shapes)
         else:result=distant_mesh(names,heights,visible,self.colors)
         mesh_time=perf_counter()-mesh_start
         if persist:

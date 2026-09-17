@@ -7,7 +7,7 @@ from unittest.mock import patch
 import numpy as np
 
 sys.path.insert(0,str(Path(__file__).parents[1]/'src'))
-from minecraft_viewer.mesh3d import mesh_volume, distant_mesh, decode_volume, MeshWorld, minecraft_to_renderer, terrain_jobs
+from minecraft_viewer.mesh3d import mesh_volume, distant_mesh, decode_volume, MeshWorld, minecraft_to_renderer, renderer_to_minecraft, mesh_to_renderer, terrain_jobs, render_shape, legacy_properties
 from minecraft_viewer.viewer3d import read_archive
 
 
@@ -45,11 +45,77 @@ class MeshTests(unittest.TestCase):
         result=mesh_volume(padded,0,np.full((16,16),35),{})
         self.assertEqual(len(result['vertices']),0)
 
+    def test_cutout_plant_does_not_cull_supporting_or_adjacent_blocks(self):
+        padded=np.full((4,18,18),'minecraft:air',dtype=object)
+        padded[1,2,2]='minecraft:stone';padded[2,2,2]='minecraft:grass'
+        padded[2,2,3]='minecraft:stone'
+        result=mesh_volume(padded,0,np.zeros((16,16)),{})
+        # Both stone cubes retain every face behind the non-occluding plant;
+        # crossed plant adds 24 double-sided vertices.
+        self.assertEqual(len(result['vertices']),96)
+        plant=result['vertices'][72:]
+        self.assertTrue(((plant[:,1]>=1)&(plant[:,1]<=2)).all())
+        self.assertEqual(render_shape('minecraft:short_grass'),'cross')
+
+    def test_alpha_cube_renders_but_does_not_occlude_neighbor(self):
+        with tempfile.TemporaryDirectory() as temp:
+            reader=MeshWorld(temp,temp,'test')
+            stone=reader.block_id('minecraft:stone');leaves=reader.block_id('minecraft:oak_leaves')
+            reader.block_shapes[leaves]='cutout_cube'
+            padded=np.zeros((3,18,18),dtype=np.uint32);padded[1,2,2]=stone;padded[1,2,3]=leaves
+            result=mesh_volume(padded,0,np.zeros((16,16)),reader.colors,materials=reader.materials,
+                               block_names=reader.block_names,block_properties=reader.block_properties,block_shapes=reader.block_shapes)
+            # Stone retains its face behind the leaves; the reverse hidden leaf
+            # face is still culled because stone is fully opaque.
+            self.assertEqual(len(result['vertices']),66)
+
+    def test_rail_is_thin_top_and_does_not_hide_support_block(self):
+        padded=np.full((4,18,18),'minecraft:air',dtype=object)
+        padded[1,2,2]='minecraft:stone';padded[2,2,2]='minecraft:rail'
+        result=mesh_volume(padded,0,np.zeros((16,16)),{})
+        self.assertEqual(len(result['vertices']),42) # complete support cube + rail plane
+        rail=result['vertices'][-6:]
+        np.testing.assert_allclose(rail[:,1],1.0625)
+        self.assertEqual(render_shape('minecraft:powered_rail'),'rail')
+
+    def test_wall_torch_preserves_facing_and_is_not_a_cube(self):
+        with tempfile.TemporaryDirectory() as temp:
+            reader=MeshWorld(temp,temp,'test')
+            east=reader.block_id('minecraft:wall_torch',{'facing':'east'})
+            north=reader.block_id('minecraft:wall_torch',{'facing':'north'})
+            self.assertNotEqual(east,north)
+            padded=np.zeros((3,18,18),dtype=np.uint32);padded[1,2,2]=east
+            result=mesh_volume(padded,0,np.zeros((16,16)),reader.colors,materials=reader.materials,
+                               block_names=reader.block_names,block_properties=reader.block_properties)
+            self.assertEqual(len(result['vertices']),12)
+            self.assertGreater(result['vertices'][:,0].mean(),.5)
+            self.assertEqual(render_shape('minecraft:redstone_wall_torch'),'torch')
+
+    def test_legacy_nibble_data_preserves_torch_facing(self):
+        blocks=np.zeros(4096,dtype=np.uint8);blocks[0]=50;blocks[1]=50
+        metadata=np.zeros(2048,dtype=np.uint8);metadata[0]=1|(4<<4)
+        chunk={'Level':{'Sections':[{'Y':0,'Blocks':blocks,'Data':metadata}]}}
+        with tempfile.TemporaryDirectory() as temp:
+            reader=MeshWorld(temp,temp,'test')
+            with patch.object(reader,'chunk',return_value=chunk):section=reader.section(0,0,0)
+            east,north=int(section.reshape(-1)[0]),int(section.reshape(-1)[1])
+            self.assertEqual(reader.block_properties[east],{'facing':'east'})
+            self.assertEqual(reader.block_properties[north],{'facing':'north'})
+            self.assertEqual(legacy_properties(50,5),{'facing':'up'})
+
     def test_negative_y_decode_and_coordinate_identity(self):
         chunk={'DataVersion':3105,'sections':[{'Y':-4,'block_states':{'palette':[{'Name':'minecraft:stone'}]}}]}
         low,blocks=decode_volume(chunk)
         self.assertEqual(low,-64);self.assertEqual(blocks.shape,(16,16,16))
-        self.assertEqual(minecraft_to_renderer(100,75,-200),(100,75,-200))
+        self.assertEqual(minecraft_to_renderer(100,75,-200),(100,75,200))
+        self.assertEqual(renderer_to_minecraft(*minecraft_to_renderer(100,75,-200)),(100,75,-200))
+
+    def test_renderer_reflection_preserves_front_faces(self):
+        source=self.mesh([(1,1,'minecraft:stone')])
+        result=mesh_to_renderer(source)
+        triangles=result['vertices'].reshape(-1,3,3)
+        cross=np.cross(triangles[:,1]-triangles[:,0],triangles[:,2]-triangles[:,0])
+        self.assertTrue((np.sum(cross*result['normals'][::3],axis=1)<0).all())
 
     def test_distant_mesh_and_missing_cells(self):
         names=np.full((16,16),'minecraft:grass_block',dtype=object)
