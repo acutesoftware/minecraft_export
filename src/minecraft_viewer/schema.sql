@@ -1,5 +1,20 @@
 PRAGMA foreign_keys = ON;
 
+CREATE TABLE IF NOT EXISTS mc_3d_asset (
+ sha256 TEXT PRIMARY KEY, format TEXT NOT NULL, payload BLOB NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mc_3d_export (
+ export_id INTEGER PRIMARY KEY, world_id INTEGER NOT NULL REFERENCES mc_world(world_id),
+ created_at TEXT NOT NULL DEFAULT (datetime('now')), completed_at TEXT,
+ format_version INTEGER NOT NULL, status TEXT NOT NULL, manifest_json TEXT NOT NULL,
+ error_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS mc_3d_export_asset (
+ export_id INTEGER NOT NULL REFERENCES mc_3d_export(export_id),
+ role TEXT NOT NULL, name TEXT NOT NULL, sha256 TEXT NOT NULL REFERENCES mc_3d_asset(sha256),
+ metadata_json TEXT NOT NULL DEFAULT '{}', PRIMARY KEY(export_id,role,name)
+);
+
 CREATE TABLE IF NOT EXISTS app_schema_version (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS mc_world (
  world_id INTEGER PRIMARY KEY, world_uuid TEXT NOT NULL UNIQUE, world_name TEXT NOT NULL, edition TEXT NOT NULL DEFAULT 'JAVA',
@@ -76,4 +91,3 @@ CREATE TABLE IF NOT EXISTS ref_biome (minecraft_id TEXT PRIMARY KEY, display_nam
 CREATE TABLE IF NOT EXISTS ref_stat (minecraft_id TEXT PRIMARY KEY, display_name TEXT, category TEXT, source_version TEXT);
 CREATE TABLE IF NOT EXISTS ref_advancement (minecraft_id TEXT PRIMARY KEY, display_name TEXT, category TEXT, source_version TEXT);
 CREATE TABLE IF NOT EXISTS ref_structure (minecraft_id TEXT PRIMARY KEY, display_name TEXT, category TEXT, source_version TEXT);
-

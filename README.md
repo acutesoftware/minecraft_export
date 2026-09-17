@@ -6,7 +6,7 @@ The application never writes to a Minecraft save. The database and maps live sep
 
 ## Install and run
 
-Python 3.10 or newer is recommended.
+Python 3.12 or newer is required (including the experimental Ursina 3D viewer).
 
 ```powershell
 python -m venv .venv
@@ -40,9 +40,35 @@ Tiles are ordinary PNG cache files beneath `output/maps/tiles/`, separated by wo
 
 Rendering uses WORLD_SURFACE heightmaps (or legacy HeightMap) and NumPy chunk/region arrays. Chunks without usable heightmaps use a vectorised fallback. The camera's region is queued first; visible tiles are displayed as each finishes. Up to four processes render missing tiles; set `map_render_workers` to 1–4 in `config.json` to adjust CPU use. Cached tiles load in an I/O thread, and pan/zoom reuse existing images. Per-region timings, cache hits, chunk counts and fast-path/fallback counts are logged to `logs/minecraft_viewer.log`. The upgraded renderer uses a new cache version, so the first visit rebuilds older tiles once.
 
+## Experimental 3D viewer
+
+Select an imported world and click **Open 3D View** on Overview. It opens an independent Ursina window; closing it leaves the archive application running. Install the updated requirements first. A working OpenGL graphics driver is needed. Source worlds remain read-only; visual snapshots are now written to the archive database.
+
+The camera starts above the Overworld spawn area. Detailed exposed-face chunk meshes cover roughly 192 blocks, with a simplified distant terrain shell out to 768 blocks. Select **Set Texture Source** to use a local Java client JAR or resource-pack ZIP; alternatively select the installation folder containing `versions`. Choose only one source. Server JARs and world folders do not contain the required block textures. Detailed cubes use textured faces; unavailable textures and distant terrain retain flat colours. Unsupported shapes use cubes, and deep underground terrain is omitted. Meshes are cached under `output/3d/cache/`, including source region timestamps, neighbouring-region changes and texture fingerprints.
+
+Each finished load/reload archives geometry, atlas PNG, source texture/model assets and camera settings in database tables. **3D Exports → Refresh → Open Saved Scene** replays a snapshot without Minecraft or the original world/cache. **Save Portable Database** makes a consistent self-contained database backup. Exports cover the loaded area only, not the whole world or gameplay. Keep the viewer source and runtime alongside the database for long-term preservation. See [archive format and limitations](docs/3d_archive_format.md).
+
+3D loading decodes only sections intersecting the visible surface band, using compact numeric block IDs and a bounded neighbour-section cache. Distant terrain is grouped into up to 8×8 chunks per mesh and cached in batches. Packed vertex buffers and a 6 ms per-frame upload budget replace the fixed two-chunks-per-frame limit (a single upload may exceed the budget). Reload keeps unchanged meshes on the GPU; changed source regions invalidate affected meshes. The HUD counts completed chunks, including retained terrain and empty chunks, rather than draw calls.
+
+- WASD: fly; Space/Ctrl: up/down; Shift: faster; wheel: speed.
+- G: return to spawn; R: reload a bounded area around the camera.
+- P: Photo mode; right mouse drag in Photo mode: look around.
+- Photo controls: time of day, sun azimuth, FOV, atmosphere, camera speed, detailed/distant radii. Apply radius changes with **Reload Around Camera**.
+- Presets: Clear Day, Golden Hour, Sunset, Misty Morning, Night.
+- H: hide/show HUD; F2 or **Save Screenshot**: PNG capture without HUD.
+- Esc: release the mouse, return from Photo mode, or exit when already released. Click the scene to capture the mouse again.
+
+Screenshots go to `output/3d/worlds/<world_uuid>/renders/3d_<world_name>_<timestamp>.png`. Each has a JSON sidecar identifying it as `GENERATED_3D`, separate from historical screenshots. Cache, images and metadata remain ignored by Git. Logs are in `logs/viewer3d.log` (timings and errors) and `logs/viewer3d_console.log` (when launched from the app).
+
+```powershell
+python viewer3d.py --world-id 1 --db data/minecraft_archive.db --detailed-radius 192 --distant-radius 768
+```
+
+Optional `--shadows` enables experimental shadow maps; default lighting works without them. This prototype has bounded loading, simplified cube shapes and static translucent water. Continuous streaming, exact Minecraft shapes/block-state orientation/animations, high-resolution offscreen photo export, entities, gameplay and other dimensions are deferred. Current-window PNG capture is supported.
+
 ## Deferred work
 
-Bedrock, 3D rendering, server log parsing, screenshot indexing/correlation, entity and block-entity extraction, POIs, structures, historical comparisons, internet identity lookups, and any world editing are intentionally deferred. Their archive tables are included for future phases.
+Bedrock, server log parsing, screenshot indexing/correlation, entity and block-entity extraction, POIs, structures, historical comparisons, internet identity lookups, and any world editing are intentionally deferred. Their archive tables are included for future phases.
 
 ## Tests
 

@@ -6,11 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "minecraft-viewer"
 version = "0.1.0"
 description = "Read-only Minecraft Java world archive viewer"
-requires-python = ">=3.10"
-dependencies = ["nbtlib>=2.0,<3", "Pillow>=10,<12", "numpy>=1.26,<3"]
+requires-python = ">=3.12"
+dependencies = ["nbtlib>=2.0,<3", "Pillow>=10,<12", "numpy>=1.26,<3", "ursina>=8.3,<9"]
 
 [project.gui-scripts]
 minecraft-viewer = "minecraft_viewer.app:main"
+minecraft-viewer-3d = "minecraft_viewer.viewer3d:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -3,6 +3,12 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import subprocess
+import sys
+import importlib.util
+import json
+import sqlite3
+from contextlib import closing
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -12,6 +18,7 @@ from .db import ArchiveDB
 from .importer import import_world
 from .map_view import MapView
 from .world_layout import discover_worlds
+from .textures3d import find_client,validate_source
 
 
 class ViewerApp(tk.Tk):
@@ -47,11 +54,25 @@ class ViewerApp(tk.Tk):
         ttk.Button(overview_tools, text="Open Source Folder", command=self.open_source).pack(side=tk.LEFT, padx=3)
         ttk.Button(overview_tools, text="Import / Refresh", command=self.refresh_import).pack(side=tk.LEFT, padx=3)
         ttk.Button(overview_tools, text="Browse Map", command=self.generate_default_maps).pack(side=tk.LEFT, padx=3)
+        ttk.Button(overview_tools, text="Open 3D View", command=self.open_3d).pack(side=tk.LEFT,padx=3)
+        texture_tools=ttk.Frame(overview_frame);texture_tools.pack(fill=tk.X,pady=3)
+        ttk.Button(texture_tools,text='Set Texture Source...',command=self.texture_source_dialog).pack(side=tk.LEFT,padx=3)
+        self.texture_label=ttk.Label(texture_tools,text=self.settings.get('texture_source','Automatic texture detection'))
+        self.texture_label.pack(side=tk.LEFT,padx=3)
         self.overview = tk.Text(overview_frame, wrap="word", padx=12, pady=12); self.overview.pack(fill=tk.BOTH, expand=True)
         self.players_tab = ttk.Frame(self.tabs); self.tabs.add(self.players_tab, text="Players")
         self._players_ui(); self.stats_tab = ttk.Frame(self.tabs); self.tabs.add(self.stats_tab, text="Stats & Advancements"); self._stats_ui()
         self.maps_tab = ttk.Frame(self.tabs); self.tabs.add(self.maps_tab, text="Maps"); self._maps_ui()
         self.world_data = self._text_tab("World Data"); self.archive = self._table_tab("Archive", ("date", "source", "version", "layout", "status", "size"))
+        exports_frame=ttk.Frame(self.tabs);self.tabs.add(exports_frame,text='3D Exports')
+        export_tools=ttk.Frame(exports_frame);export_tools.pack(fill=tk.X)
+        ttk.Button(export_tools,text='Refresh',command=self.refresh_3d_exports).pack(side=tk.LEFT,padx=3)
+        ttk.Button(export_tools,text='Open Saved Scene',command=self.open_saved_3d).pack(side=tk.LEFT,padx=3)
+        ttk.Button(export_tools,text='Save Portable Database...',command=self.backup_archive).pack(side=tk.LEFT,padx=3)
+        ttk.Label(exports_frame,text='Visual snapshots of loaded areas, not full-world/gameplay backups. Textures and geometry are embedded.').pack(anchor='w')
+        self.exports=ttk.Treeview(exports_frame,columns=('id','date','status','chunks','textures'),show='headings',selectmode='browse')
+        for name in self.exports['columns']:self.exports.heading(name,text=name.title())
+        self.exports.pack(fill=tk.BOTH,expand=True)
         future = self._text_tab("Sessions & Screenshots")
         future.insert("1.0", "Server Sessions & Screenshots\n\nFuture functionality:\n- import Minecraft server logs\n- record player join/leave sessions\n- index screenshots\n- correlate screenshots with active worlds\n- build a combined world timeline")
         future.configure(state="disabled")
@@ -106,6 +127,7 @@ class ViewerApp(tk.Tk):
         self.selected_world = int(selection[0]); self.refresh_details(); self.map_view.set_world(self.selected_world)
 
     def refresh_details(self):
+        self.refresh_3d_exports()
         w = self.db.row("SELECT * FROM mc_world WHERE world_id=?", (self.selected_world,)); s = self.db.row("SELECT * FROM mc_world_source WHERE world_id=? ORDER BY last_seen_at DESC LIMIT 1", (self.selected_world,))
         dims = self.db.rows("SELECT dimension_key,chunk_count FROM mc_dimension WHERE import_id=(SELECT MAX(import_id) FROM mc_import WHERE world_id=?)", (self.selected_world,))
         players = self.db.rows("SELECT * FROM mc_player WHERE world_id=?", (self.selected_world,))
@@ -140,6 +162,93 @@ class ViewerApp(tk.Tk):
         if not self.selected_world: return None
         row = self.db.row("SELECT source_path FROM mc_world_source WHERE world_id=? AND is_current=1 ORDER BY last_seen_at DESC LIMIT 1", (self.selected_world,))
         return Path(row[0]) if row else None
+
+    def texture_source_dialog(self):
+        dialog=tk.Toplevel(self);dialog.title('Choose ONE block texture source');dialog.transient(self);dialog.grab_set()
+        ttk.Label(dialog,text='Choose one option below. Do not select a saved-world folder.\nMinecraft does not need to be running.\nSaved database exports keep their own copy of the textures.',padding=12).pack(anchor='w')
+        def choose(folder):
+            dialog.destroy();self.choose_textures(folder)
+        ttk.Button(dialog,text='Installed Java Minecraft: select its folder (contains versions)',command=lambda:choose(True)).pack(fill=tk.X,padx=12,pady=5)
+        ttk.Button(dialog,text='No installation needed: select a client .jar or texture-pack .zip',command=lambda:choose(False)).pack(fill=tk.X,padx=12,pady=5)
+        ttk.Button(dialog,text='Cancel',command=dialog.destroy).pack(pady=10)
+
+    def choose_textures(self,folder):
+        path=filedialog.askdirectory(title='Choose Minecraft installation (contains versions) or extracted assets root') if folder else filedialog.askopenfilename(title='Choose Java client JAR or resource-pack ZIP',filetypes=[('Java assets','*.jar *.zip')])
+        if not path:return
+        version=self.db.row('SELECT minecraft_version FROM mc_world WHERE world_id=?',(self.selected_world,)) if self.selected_world else None
+        try:path=str(find_client(path,version[0] if version else None))
+        except ValueError:
+            path=filedialog.askopenfilename(title='Several versions found: choose the client version JAR',initialdir=str(Path(path)/'versions'),filetypes=[('Java client','*.jar')])
+            if not path:return
+        except FileNotFoundError as exc:
+            messagebox.showerror('Texture source',str(exc));return
+        try:validate_source(path)
+        except (OSError,ValueError) as exc:
+            messagebox.showerror('Texture source',str(exc));return
+        self.settings['texture_source']=path
+        (self.root_path/'config.json').write_text(json.dumps(self.settings,indent=2),encoding='utf-8')
+        self.texture_label.configure(text=path)
+
+    def refresh_3d_exports(self):
+        self.exports.delete(*self.exports.get_children())
+        if not self.selected_world:return
+        for row in self.db.rows('SELECT export_id,created_at,status,manifest_json FROM mc_3d_export WHERE world_id=? ORDER BY export_id DESC',(self.selected_world,)):
+            manifest=json.loads(row['manifest_json'])
+            self.exports.insert('', 'end',iid=str(row['export_id']),values=(row['export_id'],row['created_at'],row['status'],manifest.get('requested_chunks',0),'Yes' if manifest.get('texture_fingerprint') else 'Flat colours'))
+
+    def open_saved_3d(self):
+        selection=self.exports.selection()
+        if not selection:messagebox.showinfo('3D Exports','Select a completed or partial export first.');return
+        row=self.db.row('SELECT status FROM mc_3d_export WHERE export_id=?',(int(selection[0]),))
+        if row['status'] not in ('complete','partial'):messagebox.showinfo('3D Exports','This export did not finish. Open the live world to create a new export.');return
+        self.open_3d(int(selection[0]))
+
+    def backup_archive(self):
+        path=filedialog.asksaveasfilename(title='Save self-contained archive database (all worlds and saved scenes)',defaultextension='.db',initialfile='minecraft_visual_archive.db',filetypes=[('SQLite database','*.db')])
+        if not path:return
+        destination=Path(path).resolve()
+        if destination==self.db.path.resolve():messagebox.showerror('Archive','Choose a different database filename.');return
+        for row in self.db.rows('SELECT source_path FROM mc_world_source'):
+            source=Path(row[0]).resolve()
+            if destination==source or source in destination.parents:
+                messagebox.showerror('Archive','Save the archive outside Minecraft source worlds.');return
+        def backup():
+            with closing(sqlite3.connect(self.db.path.resolve().as_uri()+'?mode=ro',uri=True)) as source,closing(sqlite3.connect(destination)) as target:
+                source.backup(target)
+            return destination
+        def done(result,error):
+            self.import_jobs=max(0,self.import_jobs-1)
+            if not self.import_jobs:self.progress.stop();self.progress.pack_forget()
+            if error:messagebox.showerror('Archive',str(error))
+            else:messagebox.showinfo('Archive',f'Self-contained database saved to {result}. Keep a copy of this viewer and its format documentation too.')
+        self._run(backup,done)
+
+    def open_3d(self,export_id=None):
+        if not self.selected_world:
+            messagebox.showinfo('3D Viewer','Select an imported world first.');return
+        if importlib.util.find_spec('ursina') is None:
+            messagebox.showerror('3D Viewer','Install the updated dependencies: pip install -r requirements.txt');return
+        try:
+            command=[sys.executable,'-m','minecraft_viewer.viewer3d','--world-id',str(self.selected_world),
+                     '--db',str(self.db.path.resolve()),'--output',str((self.root_path/'output'/'3d').resolve())]
+            if export_id:command+=['--export-id',str(export_id)]
+            elif self.settings.get('texture_source'):
+                validate_source(find_client(self.settings['texture_source']))
+                command+=['--textures',self.settings['texture_source']]
+            environment=os.environ.copy()
+            environment['PYTHONPATH']=str(Path(__file__).resolve().parent.parent)+os.pathsep+environment.get('PYTHONPATH','')
+            logs=self.root_path/'logs';logs.mkdir(exist_ok=True)
+            with (logs/'viewer3d_console.log').open('a',encoding='utf-8') as stream:
+                process=subprocess.Popen(command,cwd=self.root_path,env=environment,stdout=stream,stderr=stream,
+                                 creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+            self.status.configure(text='Opened experimental 3D viewer in a separate window.')
+            def check_viewer():
+                code=process.poll()
+                if code is None:self.after(2000,check_viewer)
+                elif code!=0:
+                    messagebox.showerror('3D Viewer','The experimental viewer stopped with an error. See logs/viewer3d.log and logs/viewer3d_console.log for details.')
+            self.after(2000,check_viewer)
+        except (OSError,ValueError) as exc:messagebox.showerror('3D Viewer',str(exc))
     def open_source(self):
         source = self._selected_source()
         if source and source.exists(): os.startfile(source)
