@@ -12,6 +12,27 @@ from PIL import Image
 
 FACE_NAMES=('east','west','up','down','south','north')
 
+# Names used by the 1.12 client asset registry (distinct from its numeric IDs).
+OLD_ASSET_NAMES = {
+    'grass_block':'grass', 'grass':'tall_grass', 'short_grass':'tall_grass',
+    'tall_grass':'double_grass', 'large_fern':'double_fern', 'lilac':'syringa',
+    'rose_bush':'double_rose', 'peony':'paeonia', 'azure_bluet':'houstonia',
+    'bricks':'brick_block', 'stone_bricks':'stonebrick', 'mossy_stone_bricks':'mossy_stonebrick',
+    'cracked_stone_bricks':'cracked_stonebrick', 'chiseled_stone_bricks':'chiseled_stonebrick',
+    'polished_granite':'smooth_granite', 'polished_diorite':'smooth_diorite', 'polished_andesite':'smooth_andesite',
+    'cut_sandstone':'smooth_sandstone', 'cut_red_sandstone':'smooth_red_sandstone',
+    'quartz_pillar':'quartz_column', 'oak_fence':'fence', 'oak_fence_gate':'fence_gate',
+    'oak_door':'wooden_door', 'oak_trapdoor':'trapdoor', 'oak_button':'wooden_button',
+    'oak_pressure_plate':'wooden_pressure_plate', 'cobblestone_stairs':'stone_stairs',
+    'terracotta':'hardened_clay', 'nether_bricks':'nether_brick', 'red_nether_bricks':'red_nether_brick',
+    'end_stone_bricks':'end_bricks', 'slime_block':'slime', 'magma_block':'magma',
+    'note_block':'noteblock', 'nether_quartz_ore':'quartz_ore', 'sugar_cane':'reeds',
+    'cobweb':'web', 'spawner':'mob_spawner', 'melon':'melon_block', 'lily_pad':'waterlily',
+    'powered_rail':'golden_rail', 'jack_o_lantern':'lit_pumpkin', 'nether_portal':'portal',
+    'repeater':'unpowered_repeater', 'comparator':'unpowered_comparator',
+    'snow':'snow_layer', 'snow_block':'snow', 'petrified_oak_slab':'wood_old_slab',
+}
+
 
 def validate_source(source):
     """Cheap preflight for the picker, without decoding PNGs or copying game code."""
@@ -72,6 +93,7 @@ class TextureAtlas:
     """Cube-face approximation; model parents/texture variables resolved, shapes deferred."""
     def __init__(self,assets):
         self.assets=assets;self.rects={};self.alpha={};self.models={};self.faces={};self.shapes={}
+        self.legacy_assets=any('/textures/blocks/' in name for name in assets)
         self.fingerprint=hashlib.sha256(b''.join(n.encode()+hashlib.sha256(v).digest() for n,v in sorted(assets.items()))).hexdigest()
         pictures=[]
         for name,data in sorted(assets.items()):
@@ -107,6 +129,9 @@ class TextureAtlas:
         return result
 
     def block_model(self,block,properties=None):
+        if block=='minecraft:wet_sponge' and 'assets/minecraft/blockstates/wet_sponge.json' not in self.assets:
+            block='minecraft:sponge';properties={**(properties or {}),'wet':'true'}
+        block=self.asset_block(block)
         # 1.13 renamed the plant while old saves still decode legacy ID 31 as grass.
         if block=='minecraft:grass' and 'assets/minecraft/blockstates/grass.json' not in self.assets:
             block='minecraft:short_grass'
@@ -120,7 +145,23 @@ class TextureAtlas:
         if not choice and state.get('multipart'):
             apply=state['multipart'][0].get('apply',{})
             choice=apply[0] if isinstance(apply,list) and apply else apply
-        return self.model(choice.get('model',f'{namespace}:block/{ident}'))
+        model=choice.get('model',f'{namespace}:block/{ident}')
+        ns,path=model.split(':',1) if ':' in model else ('minecraft',model)
+        # Before 1.13 blockstate model references omit the block/ directory.
+        if '/' not in path:model=f'{ns}:block/{path}'
+        return self.model(model)
+
+    def asset_block(self,block):
+        namespace,ident=block.split(':',1) if ':' in block else ('minecraft',block)
+        if namespace!='minecraft' or not self.legacy_assets:return block
+        old=OLD_ASSET_NAMES.get(ident,ident)
+        if ident.startswith('infested_'):
+            base=ident[len('infested_'):]
+            old=OLD_ASSET_NAMES.get(base,base)
+        if ident.endswith('_terracotta') and not ident.endswith('_glazed_terracotta'):
+            old=ident[:-len('_terracotta')]+'_stained_hardened_clay'
+        if old.startswith('light_gray_'):old='silver_'+old[len('light_gray_'):]
+        return f'{namespace}:{old}'
 
     def resolve_texture(self,block,direction,properties=None):
         if block=='minecraft:grass' and 'assets/minecraft/blockstates/grass.json' not in self.assets:block='minecraft:short_grass'
@@ -131,14 +172,15 @@ class TextureAtlas:
             face=element.get('faces',{}).get(direction)
             if face:ref=face.get('texture');break
         if ref is None:
-            candidates=(direction,'top' if direction=='up' else 'bottom' if direction=='down' else 'side','end' if direction in ('up','down') else 'side','cross','plant','all','texture')
+            candidates=(direction,'top' if direction=='up' else 'bottom' if direction=='down' else 'side','end' if direction in ('up','down') else 'side','cross','plant','all','texture','crop','stem','particle')
             ref=next((refs[n] for n in candidates if n in refs),f'{namespace}:block/{ident}')
         visited=set()
         while ref.startswith('#') and ref not in visited:
             visited.add(ref);ref=refs.get(ref[1:],'')
         ns,texture=ref.split(':',1) if ':' in ref else ('minecraft',ref)
         paths=[f'assets/{ns}/textures/{texture}.png',f'assets/{ns}/textures/{texture.replace("block/","blocks/")}.png']
-        if ident in ('water','lava'):paths.insert(0,f'assets/{namespace}/textures/block/{ident}_still.png')
+        if ident in ('water','lava'):
+            paths[:0]=[f'assets/{namespace}/textures/{folder}/{ident}_still.png' for folder in ('block','blocks')]
         return next((p for p in paths if p in self.rects),None)
 
     def render_shape(self,block,properties=None):
@@ -146,9 +188,11 @@ class TextureAtlas:
         if key in self.shapes:return self.shapes[key]
         ident=block.split(':')[-1];model=self.block_model(block,properties)
         parents=' '.join(p or '' for p in model.get('_parents',()))
-        if 'rail' in ident:shape='rail'
+        if ident.endswith('_fence') or ident=='fence':shape='fence'
+        elif ident.endswith('_fence_gate') or ident=='fence_gate':shape='fence_gate'
+        elif 'rail' in ident:shape='rail'
         elif ident in ('torch','wall_torch','redstone_torch','redstone_wall_torch','soul_torch','soul_wall_torch'):shape='torch'
-        elif 'cross' in parents or 'flower' in parents:shape='cross'
+        elif 'cross' in parents or 'flower' in parents or 'crop' in parents:shape='cross'
         else:
             paths=[self.resolve_texture(block,direction,properties) for direction in FACE_NAMES]
             shape='cutout_cube' if any(path and self.alpha.get(path,False) for path in paths) else 'cube'

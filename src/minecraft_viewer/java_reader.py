@@ -17,6 +17,7 @@ import logging
 
 from .models import ChunkInfo, DimensionInfo, PlayerData, WorldMetadata
 from .world_layout import WorldLayout
+from .legacy_blocks import legacy_names, legacy_name
 
 
 def _plain(value: Any) -> Any:
@@ -233,22 +234,6 @@ def _packed_index(data: list[int], index: int, bits: int, compact: bool = False)
     return value & mask
 
 
-LEGACY_BLOCKS = {
-    0: "minecraft:air", 1: "minecraft:stone", 2: "minecraft:grass_block", 3: "minecraft:dirt",
-    4: "minecraft:cobblestone", 5: "minecraft:oak_planks", 7: "minecraft:bedrock", 8: "minecraft:water",
-    9: "minecraft:water", 10: "minecraft:lava", 11: "minecraft:lava", 12: "minecraft:sand",
-    13: "minecraft:gravel", 17: "minecraft:oak_log", 18: "minecraft:oak_leaves", 24: "minecraft:sandstone",
-    31: "minecraft:grass", 78: "minecraft:snow", 79: "minecraft:ice", 80: "minecraft:snow_block",
-    87: "minecraft:netherrack", 88: "minecraft:soul_sand", 89: "minecraft:glowstone", 110: "minecraft:mycelium",
-    121: "minecraft:end_stone", 159: "minecraft:terracotta", 172: "minecraft:terracotta",
-    20: "minecraft:glass", 35: "minecraft:white_wool", 41: "minecraft:gold_block",
-    42: "minecraft:iron_block", 43: "minecraft:stone_slab", 44: "minecraft:stone_slab",
-    45: "minecraft:bricks", 49: "minecraft:obsidian", 53: "minecraft:oak_stairs",
-    66: "minecraft:rail", 67: "minecraft:cobblestone_stairs", 98: "minecraft:stone_bricks",
-    108: "minecraft:brick_stairs", 109: "minecraft:stone_brick_stairs", 155: "minecraft:quartz_block"
-}
-
-
 def is_visible_surface(block_id: str) -> bool:
     """Opaque and translucent blocks, including roofs/water/leaves, cover air."""
     return block_id not in ("minecraft:air", "minecraft:cave_air", "minecraft:void_air")
@@ -314,12 +299,11 @@ def surface_arrays(chunk, metrics):
             if palette:
                 palette = np.array([str(p.get('Name',p.get('name','minecraft:air'))) for p in palette],dtype=object)
                 decoded[sy] = (palette,state.get('data',s.get('BlockStates',[])))
-            else: decoded[sy] = (None,np.asarray(s.get('Blocks',[]),dtype=np.int64)&255)
+            else: decoded[sy] = (None,legacy_names(s))
         palette,data = decoded[sy]
         if palette is not None:
             return palette[unpack_values(data,indices,max(4,(len(palette)-1).bit_length()),version>=2529)]
-        ids = data[indices]
-        return np.array([LEGACY_BLOCKS.get(int(i),'minecraft:unknown') for i in ids.flat],dtype=object).reshape(ids.shape)
+        return data[indices]
 
     def visible(values):
         return ~np.isin(values,['minecraft:air','minecraft:cave_air','minecraft:void_air'])
@@ -391,7 +375,12 @@ def _surface_samples(chunk: dict[str, Any], cx: int, cz: int, bounds: tuple[int,
                         blocks = section.get("Blocks", [])
                         if len(blocks) != 4096:
                             continue
-                        name = LEGACY_BLOCKS.get(int(blocks[idx]) & 255, "minecraft:unknown")
+                        metadata = section.get('Data', [])
+                        additions = section.get('Add', [])
+                        shift = (idx & 1)*4
+                        data = (int(metadata[idx//2]) >> shift) & 15 if len(metadata) else 0
+                        high = (int(additions[idx//2]) >> shift) & 15 if len(additions) else 0
+                        name = legacy_name((int(blocks[idx]) & 255) | (high << 8), data)
                     if is_visible_surface(name):
                         biomes = section.get("biomes", {})
                         bpalette = biomes.get("palette", [])

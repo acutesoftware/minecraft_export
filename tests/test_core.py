@@ -125,6 +125,24 @@ class MapTests(unittest.TestCase):
         self.assertEqual(block_color("example:mysterious", colors), (1, 2, 3))
         self.assertEqual(unknown_color("example:x"), unknown_color("example:x"))
 
+    def test_dyed_wool_colours_are_distinct(self):
+        colors = {"fallback": "#010203"}
+        self.assertEqual(block_color("minecraft:red_wool", colors), (161, 39, 34))
+        self.assertEqual(block_color("minecraft:light_blue_wool", colors), (58, 174, 216))
+        self.assertNotEqual(block_color("minecraft:white_wool", colors), block_color("minecraft:black_wool", colors))
+
+    def test_concrete_and_powder_use_material_specific_colours(self):
+        colors = {"fallback": "#010203"}
+        self.assertEqual(block_color("minecraft:blue_concrete", colors), (44, 46, 143))
+        self.assertEqual(block_color("minecraft:blue_concrete_powder", colors), (70, 73, 166))
+        self.assertEqual(block_color("example:red_cement", colors), (142, 33, 33))
+
+    def test_other_dyed_block_families_keep_their_dye(self):
+        colors = {"fallback": "#010203"}
+        self.assertEqual(block_color("minecraft:cyan_terracotta", colors), (87, 91, 91))
+        self.assertEqual(block_color("minecraft:lime_stained_glass_pane", colors), (112, 185, 25))
+        self.assertEqual(block_color("minecraft:pink_carpet", colors), block_color("minecraft:pink_wool", colors))
+
 
 if __name__ == "__main__":
     unittest.main()

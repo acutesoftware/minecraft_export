@@ -14,7 +14,7 @@ from .java_reader import JavaWorldReader
 from .map_renderer import block_color, biome_color
 
 TILE_SIZE = 512
-RENDER_VERSION = "tiles-2-heightmaps"
+RENDER_VERSION = "tiles-4-legacy-variants"
 BACKGROUND = (30, 30, 34)
 log = logging.getLogger(__name__)
 

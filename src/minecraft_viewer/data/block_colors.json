@@ -1,8 +1,18 @@
 {
   "fallback": "#8b7f8f",
+  "gold_block": "#f6d03d", "iron_block": "#d5d5d5", "diamond_block": "#62ded6",
+  "emerald_block": "#2acb57", "lapis_block": "#2145a1", "redstone_block": "#af1a05",
+  "coal_block": "#151515", "quartz_block": "#ece7df", "quartz": "#e5dfd5",
+  "obsidian": "#20182e", "bedrock": "#555555", "clay": "#9fa4b1",
+  "bricks": "#965f4e", "stone_bricks": "#7a797a", "nether_bricks": "#2d171b",
+  "red_nether_bricks": "#450909", "end_stone_bricks": "#dbe09f",
+  "terracotta": "#985e43", "purpur": "#a879a8", "prismarine": "#639c97",
+  "dark_prismarine": "#335b4b", "sea_lantern": "#b5d6cc", "sponge": "#c3c04a",
+  "chest": "#986b28", "sign": "#9b804f", "bed": "#a83232", "skull": "#a5a19a",
+  "oak": "#a48650", "spruce": "#735531", "birch": "#c3b37b",
+  "jungle": "#9a6e4d", "acacia": "#aa5c33", "dark_oak": "#49321b",
   "grass": "#638d3d", "water": "#3f76e4", "sand": "#d8ca7e",
   "stone": "#7d7d7d", "snow": "#f5f7f7", "leaves": "#3f6f32",
   "log": "#74562e", "wood": "#74562e", "lava": "#e65b16",
   "dirt": "#866043", "deepslate": "#4b4b50", "ice": "#8ebfff"
 }
-

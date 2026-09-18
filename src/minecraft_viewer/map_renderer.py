@@ -14,6 +14,35 @@ from .db import ArchiveDB
 from .java_reader import JavaWorldReader
 
 
+# Approximate in-game surface colours.  These are handled as complete block
+# families rather than loose substring rules so, for example, light_blue does
+# not accidentally resolve as blue.
+WOOL_COLORS = {
+    "white": "#e9ecec", "orange": "#f07613", "magenta": "#bd44b3", "light_blue": "#3aaed8",
+    "yellow": "#f8c627", "lime": "#70b919", "pink": "#ed8dac", "gray": "#3e4447",
+    "light_gray": "#8e9294", "cyan": "#158991", "purple": "#792aac", "blue": "#35399d",
+    "brown": "#724728", "green": "#546d1b", "red": "#a12722", "black": "#141519",
+}
+CONCRETE_COLORS = {
+    "white": "#cfd5d6", "orange": "#e06101", "magenta": "#a9309f", "light_blue": "#2389c6",
+    "yellow": "#f1af15", "lime": "#5ea919", "pink": "#d5658e", "gray": "#36393d",
+    "light_gray": "#7d7d73", "cyan": "#157788", "purple": "#64209c", "blue": "#2c2e8f",
+    "brown": "#603b1f", "green": "#495b24", "red": "#8e2121", "black": "#080a0f",
+}
+CONCRETE_POWDER_COLORS = {
+    "white": "#e2e4e4", "orange": "#e3831f", "magenta": "#c653b8", "light_blue": "#4ab4d5",
+    "yellow": "#e8c736", "lime": "#7dbd29", "pink": "#e499b5", "gray": "#4c5356",
+    "light_gray": "#9a9a94", "cyan": "#24939d", "purple": "#8446b3", "blue": "#4649a6",
+    "brown": "#79553a", "green": "#61772d", "red": "#a83632", "black": "#1b1d21",
+}
+TERRACOTTA_COLORS = {
+    "white": "#d1b2a1", "orange": "#a15325", "magenta": "#95576c", "light_blue": "#706c8a",
+    "yellow": "#ba8524", "lime": "#677535", "pink": "#a14e4e", "gray": "#392923",
+    "light_gray": "#876b62", "cyan": "#575b5b", "purple": "#764656", "blue": "#4a3b5b",
+    "brown": "#4d3323", "green": "#4c532a", "red": "#8f3d2f", "black": "#251610",
+}
+
+
 def map_bounds(centre_x: int, centre_z: int, radius: int) -> tuple[int, int, int, int]:
     return centre_x - radius, centre_z - radius, centre_x + radius, centre_z + radius
 
@@ -30,7 +59,34 @@ def _hex(value: str) -> tuple[int, int, int]:
 
 def block_color(block: str, colors: dict[str, str]) -> tuple[int, int, int]:
     short = block.split(":")[-1]
-    for key, value in colors.items():
+    if block in colors or short in colors:
+        return _hex(colors.get(block, colors.get(short)))
+    families = (
+        ("_concrete_powder", CONCRETE_POWDER_COLORS),
+        ("_cement_powder", CONCRETE_POWDER_COLORS),
+        ("_glazed_terracotta", TERRACOTTA_COLORS),
+        ("_stained_glass_pane", WOOL_COLORS),
+        ("_stained_glass", WOOL_COLORS),
+        ("_shulker_box", WOOL_COLORS),
+        ("_concrete", CONCRETE_COLORS),
+        ("_cement", CONCRETE_COLORS),
+        ("_terracotta", TERRACOTTA_COLORS),
+        ("_wool", WOOL_COLORS),
+        ("_carpet", WOOL_COLORS),
+        ("_candle", WOOL_COLORS),
+        ("_banner", WOOL_COLORS),
+        ("_bed", WOOL_COLORS),
+    )
+    for suffix, palette in families:
+        if short.endswith(suffix):
+            dye = short[:-len(suffix)]
+            if dye in palette:
+                return _hex(palette[dye])
+    # Prefer dark_oak over oak, and stone_bricks over stone.
+    for key in sorted(colors, key=len, reverse=True):
+        value = colors[key]
+        if key in ('oak','spruce','birch','jungle','acacia','dark_oak') and short.endswith(('leaves','sapling')):
+            continue
         if key != "fallback" and key in short:
             return _hex(value)
     return _hex(colors.get("fallback", "#8b7f8f"))

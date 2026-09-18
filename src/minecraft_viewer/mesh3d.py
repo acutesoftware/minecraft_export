@@ -8,20 +8,13 @@ from time import perf_counter
 
 import numpy as np
 
-from .java_reader import JavaWorldReader, LEGACY_BLOCKS, unpack_values, surface_arrays
+from .java_reader import JavaWorldReader, unpack_values, surface_arrays
 from .map_renderer import block_color
+from .legacy_blocks import legacy_name, legacy_names, legacy_pairs
 
-VERSION = 'mesh-8'
+VERSION = 'mesh-10'
 ARRAYS=('vertices','normals','colors','uvs')
 AIR = ('minecraft:air','minecraft:cave_air','minecraft:void_air')
-LEGACY_MATERIALS = {**LEGACY_BLOCKS, 6:'minecraft:oak_sapling', 32:'minecraft:dead_bush',
-    37:'minecraft:dandelion',38:'minecraft:poppy',50:'minecraft:torch',54:'minecraft:chest',
-    58:'minecraft:crafting_table',60:'minecraft:farmland',61:'minecraft:furnace',62:'minecraft:furnace',
-    75:'minecraft:redstone_torch',76:'minecraft:redstone_torch',85:'minecraft:oak_fence',95:'minecraft:glass',102:'minecraft:glass_pane',
-    125:'minecraft:oak_slab',126:'minecraft:oak_slab',134:'minecraft:spruce_stairs',
-    135:'minecraft:birch_stairs',136:'minecraft:jungle_stairs',160:'minecraft:glass_pane',
-    161:'minecraft:acacia_leaves',162:'minecraft:acacia_log',163:'minecraft:acacia_stairs',
-    164:'minecraft:dark_oak_stairs',175:'minecraft:tall_grass'}
 
 
 def minecraft_to_renderer(x,y,z):
@@ -57,8 +50,7 @@ def decode_volume(chunk):
             indices=unpack_values(state.get('data',s.get('BlockStates',[])),np.arange(4096),max(4,(len(names)-1).bit_length()),int(chunk.get('DataVersion',0))>=2529)
             blocks=names[indices]
         else:
-            ids=np.asarray(s.get('Blocks',np.zeros(4096)),dtype=np.int64)&255
-            blocks=np.array([LEGACY_MATERIALS.get(int(i),'minecraft:unknown') for i in ids],dtype=object)
+            blocks=legacy_names(s)
         y=int(s['Y'])*16-low
         volume[y:y+16]=blocks.reshape(16,16,16)
     return low,volume
@@ -66,10 +58,8 @@ def decode_volume(chunk):
 
 def material(name,colors):
     if 'water' in name: return (0.16,0.42,0.85,.65)
+    if 'stained_glass' in name: return tuple(c/255 for c in block_color(name,colors))+(.4,)
     if 'glass' in name: return (.65,.85,.95,.4)
-    if 'brick' in name: return (.58,.26,.19,1)
-    if any(s in name for s in ('planks','stairs','fence','door')) and any(s in name for s in ('oak','birch','spruce','wood')):
-        return (.52,.36,.19,1)
     return tuple(c/255 for c in block_color(name,colors))+(1,)
 
 
@@ -88,6 +78,8 @@ CROSS_WORDS=('grass','fern','flower','sapling','mushroom','bush','tulip','orchid
 def render_shape(name):
     """Approximate common non-solid Minecraft models without hiding geometry behind them."""
     ident=name.split(':')[-1]
+    if ident.endswith('_fence') or ident=='fence':return 'fence'
+    if ident.endswith('_fence_gate') or ident=='fence_gate':return 'fence_gate'
     if 'rail' in ident:return 'rail'
     if ident in ('torch','wall_torch','redstone_torch','redstone_wall_torch','soul_torch','soul_wall_torch'):return 'torch'
     if any(word in ident for word in CROSS_WORDS) and not ident.endswith(('grass_block','moss_block')):return 'cross'
@@ -95,6 +87,11 @@ def render_shape(name):
 
 
 def legacy_properties(block_id,data):
+    if block_id in (107,183,184,185,186,187):
+        return {'facing':('south','west','north','east')[data & 3],'open':str(bool(data & 4)).lower()}
+    if block_id in (17,162,170,216):
+        return {'axis':{0:'y',4:'x',8:'z',12:'y'}[data & 12]}
+    if block_id in (59,141,142,207,115):return {'age':str(data)}
     if block_id in (50,75,76):
         return {'facing':{1:'east',2:'west',3:'south',4:'north',5:'up'}.get(data,'up')}
     if block_id==66:
@@ -103,7 +100,7 @@ def legacy_properties(block_id,data):
     return {}
 
 
-def _special_geometry(blocks,band,low,palette,atlas,block_names,block_properties,block_shapes,numeric):
+def _special_geometry(blocks,band,low,palette,atlas,block_names,block_properties,block_shapes,numeric,padded):
     vertices=[];normals=[];rgba=[];uvs=[]
     unique=np.unique(blocks[band])
     for block_id in unique:
@@ -114,6 +111,55 @@ def _special_geometry(blocks,band,low,palette,atlas,block_names,block_properties
         yy,zz,xx=np.nonzero(mask)
         if not len(xx):continue
         base=np.column_stack((xx,yy+low,zz)).astype(np.float32)
+        if shape in ('fence','fence_gate'):
+            properties=block_properties[int(block_id)] if numeric and block_properties else {}
+            boxes=[]
+            directions=()
+            if shape=='fence':
+                boxes.append((base,(.375,0,.375),(.625,1,.625)))
+                directions=(('east',1,0),('west',-1,0),('south',0,1),('north',0,-1))
+            else:
+                bounds=[((0,.3125,.4375),(.125,1,.5625)),((.875,.3125,.4375),(1,1,.5625))]
+                if properties.get('open')=='true':
+                    for x0,x1 in ((0,.125),(.875,1)):
+                        for y0,y1 in ((.375,.5625),(.75,.9375)):
+                            bounds.append(((x0,y0,.5),(x1,y1,1)))
+                else:
+                    for y0,y1 in ((.375,.5625),(.75,.9375)):
+                        bounds.append(((.125,y0,.4375),(.875,y1,.5625)))
+                for start,end in bounds:
+                    if properties.get('facing','south') in ('east','west'):
+                        start=(start[2],start[1],start[0]);end=(end[2],end[1],end[0])
+                    boxes.append((base,start,end))
+            for direction,dx,dz in directions:
+                neighbors=padded[yy+1,zz+1+dz,xx+1+dx]
+                def connects(value):
+                    other=block_names[int(value)] if numeric else str(value)
+                    other_shape=block_shapes[int(value)] if numeric and block_shapes else render_shape(other)
+                    if other in AIR:return False
+                    if other_shape=='fence':return ('nether_brick' in name)==('nether_brick' in other)
+                    if other.endswith('_fence_gate'):return True
+                    alpha=palette[int(value)][3] if numeric else material(other,{})[3]
+                    return other_shape=='cube' and alpha==1
+                connected=np.array([connects(value) for value in neighbors])
+                if direction in properties:connected[:]=properties[direction]=='true'
+                origins=base[connected]
+                if not len(origins):continue
+                x0,x1=(.5,1) if dx>0 else (0,.5) if dx<0 else (.4375,.5625)
+                z0,z1=(.5,1) if dz>0 else (0,.5) if dz<0 else (.4375,.5625)
+                for y0,y1 in ((.375,.5625),(.75,.9375)):
+                    boxes.append((origins,(x0,y0,z0),(x1,y1,z1)))
+            for origins,start,end in boxes:
+                for face_index,(normal,corners) in enumerate(FACES):
+                    points=np.asarray(start)+(np.asarray(end)-start)*np.asarray(corners)
+                    geometry=(origins[:,None,:]+points[None,[0,2,1,0,3,2],:]).reshape(-1,3)
+                    direction=('east','west','up','down','south','north')[face_index]
+                    uv,found,tinted=atlas.face(name,direction,properties) if atlas else (np.tile([0,1],(6,1)),False,False)
+                    colour=np.array(palette[int(block_id)] if numeric else palette[name],dtype=np.float32,copy=True)
+                    if found and not tinted:colour[:3]=1
+                    vertices.append(geometry);normals.append(np.tile(normal,(len(geometry),1)))
+                    rgba.append(np.tile(colour,(len(geometry),1)));uvs.append(np.tile(uv,(len(origins),1)))
+            continue
         if shape=='rail':
             quads=np.array([[(0,.0625,0),(1,.0625,1),(1,.0625,0),(0,.0625,0),(0,.0625,1),(1,.0625,1)]],dtype=np.float32)
             direction='up';normal=(0,1,0)
@@ -144,7 +190,7 @@ def _special_geometry(blocks,band,low,palette,atlas,block_names,block_properties
         geometry=(base[:,None,None,:]+quads[None,:,:,:]).reshape(-1,3)
         vertices.append(geometry)
         normals.append(np.tile(normal,(len(geometry),1)))
-        colour=np.asarray(palette[int(block_id)] if numeric else palette[name],dtype=np.float32)
+        colour=np.array(palette[int(block_id)] if numeric else palette[name],dtype=np.float32,copy=True)
         properties=block_properties[int(block_id)] if numeric and block_properties else {}
         uv,found,tinted=atlas.face(name,direction,properties) if atlas else (np.tile([0,1],(6,1)),False,False)
         if found and not tinted:colour[:3]=1
@@ -203,7 +249,7 @@ def mesh_volume(padded, low, heights, colors, depth=16, materials=None, atlas=No
                 if found and not tinted:face_colors[mask,:3]=1
         uvs.append(face_uv.reshape(-1,2))
         rgba.append(np.repeat(face_colors,6,axis=0))
-    special=_special_geometry(blocks,band,low,palette,atlas,block_names,block_properties,block_shapes,numeric) if (not numeric or block_names) else ([],[],[],[])
+    special=_special_geometry(blocks,band,low,palette,atlas,block_names,block_properties,block_shapes,numeric,padded) if (not numeric or block_names) else ([],[],[],[])
     for target,values in zip((vertices,normals,rgba,uvs),special):target.extend(values)
     if not vertices:return empty_mesh()
     return {'vertices':np.concatenate(vertices).astype('float32'),'normals':np.concatenate(normals).astype('float32'),'colors':np.concatenate(rgba).astype('float32'),'uvs':np.concatenate(uvs)}
@@ -284,12 +330,8 @@ class MeshWorld:
                 indices=unpack_values(state.get('data',section.get('BlockStates',[])),np.arange(4096),max(4,(len(ids)-1).bit_length()),int(chunk.get('DataVersion',0))>=2529)
                 result=ids[indices].reshape(16,16,16)
             elif len(section.get('Blocks',[]))==4096:
-                legacy_ids=np.asarray(section['Blocks'],dtype=np.int64)&255
-                packed_data=np.asarray(section.get('Data',np.zeros(2048)),dtype=np.uint8)&255
-                metadata=np.zeros(4096,dtype=np.uint8)
-                metadata[0::2]=packed_data&15;metadata[1::2]=packed_data>>4
-                pairs=legacy_ids*16+metadata
-                lookup={int(pair):self.block_id(LEGACY_MATERIALS.get(int(pair)//16,'minecraft:unknown'),
+                pairs=legacy_pairs(section)
+                lookup={int(pair):self.block_id(legacy_name(int(pair)//16,int(pair)%16),
                                                  legacy_properties(int(pair)//16,int(pair)%16))
                         for pair in np.unique(pairs)}
                 result=np.array([lookup[int(pair)] for pair in pairs],dtype=np.uint32).reshape(16,16,16)
