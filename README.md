@@ -48,7 +48,7 @@ Rendering uses WORLD_SURFACE heightmaps (or legacy HeightMap) and NumPy chunk/re
 
 Select an imported world, open the **3D Viewer** tab immediately to the right of **Maps**, and click **Open 3D Viewer**. It opens an independent Ursina window; closing it leaves the archive application running. Install the updated requirements first. A working OpenGL graphics driver is needed. Source worlds remain read-only; visual snapshots are now written to the archive database.
 
-<video src="docs/flyover_2026-09-19.mp4" controls autoplay muted width="100%"></video>
+<video src="https://github.com/acutesoftware/minecraft_export/blob/main/docs/flyover_2026-09-19.mp4" controls autoplay muted width="100%"></video>
 
 
 The camera starts above the Overworld spawn area. Detailed exposed-face chunk meshes cover roughly 192 blocks, with a simplified distant terrain shell out to 768 blocks. Select **Set Texture Source** to use a local Java client JAR or resource-pack ZIP; alternatively select the installation folder containing `versions`. Choose only one source. Server JARs and world folders do not contain the required block textures. Detailed cubes use textured faces; plants use crossed alpha-cutout planes and rails use thin top planes without hiding their supporting terrain. Standing and wall-mounted torches retain modern or legacy facing data. Unavailable textures and distant terrain retain flat colours. Other unsupported shapes use cubes, and deep underground terrain is omitted. Minecraft +Z remains south in displayed/exported coordinates; playback compensates for Ursina's opposite Z handedness. Meshes are cached under `output/3d/cache/`, including source region timestamps, neighbouring-region changes and texture fingerprints.
