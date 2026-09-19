@@ -4,6 +4,10 @@ Minecraft Viewer is a local, read-only desktop archive browser for Minecraft Jav
 
 The application never writes to a Minecraft save. All user-generated data lives beneath `USER_FOLDER_ROOT`; only `config.json`, which points to that location, lives in the code folder.
 
+## User Guide
+
+[Read the User Guide](docs/user_guide.md)
+
 ## Install and run
 
 Python 3.12 or newer is required (including the experimental Ursina 3D viewer).
@@ -33,6 +37,9 @@ NBT and Anvil access is isolated in `JavaWorldReader`; UI and database code do n
 
 Open the Maps tab to browse a continuous world map. Visible 512×512-block region tiles load automatically; new areas render in a background thread. Surface, biome, height, and activity layers share the same camera location and zoom.
 
+![Sample Map View](docs/map_view_v02.png)
+
+
 - Drag with the left or middle mouse button to pan; arrows or WASD also pan when the canvas has focus.
 - Use the mouse wheel to zoom around the cursor (12.5% through 800%). Blocks stay crisp with nearest-neighbour scaling.
 - Home or **Go To Spawn** returns to spawn. Enter X/Z and press **Go** to visit any coordinate.
@@ -48,7 +55,6 @@ Rendering uses WORLD_SURFACE heightmaps (or legacy HeightMap) and NumPy chunk/re
 
 Select an imported world, open the **3D Viewer** tab immediately to the right of **Maps**, and click **Open 3D Viewer**. It opens an independent Ursina window; closing it leaves the archive application running. Install the updated requirements first. A working OpenGL graphics driver is needed. Source worlds remain read-only; visual snapshots are now written to the archive database.
 
-<video src="https://github.com/acutesoftware/minecraft_export/blob/main/docs/flyover_2026-09-19.mp4" controls autoplay muted width="100%"></video>
 
 
 The camera starts above the Overworld spawn area. Detailed exposed-face chunk meshes cover roughly 192 blocks, with a simplified distant terrain shell out to 768 blocks. Select **Set Texture Source** to use a local Java client JAR or resource-pack ZIP; alternatively select the installation folder containing `versions`. Choose only one source. Server JARs and world folders do not contain the required block textures. Detailed cubes use textured faces; plants use crossed alpha-cutout planes and rails use thin top planes without hiding their supporting terrain. Standing and wall-mounted torches retain modern or legacy facing data. Unavailable textures and distant terrain retain flat colours. Other unsupported shapes use cubes, and deep underground terrain is omitted. Minecraft +Z remains south in displayed/exported coordinates; playback compensates for Ursina's opposite Z handedness. Meshes are cached under `output/3d/cache/`, including source region timestamps, neighbouring-region changes and texture fingerprints.
